@@ -1,6 +1,6 @@
 /**
  * WOPR Discord Plugin
- * Talk to your WOPR sessions via Discord.
+ * Streaming with proper message coalescing
  */
 
 import { Client, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, DMChannel } from "discord.js";
@@ -8,9 +8,8 @@ import winston from "winston";
 import path from "path";
 import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage } from "./types.js";
 
-// Create proper logger
 const logger = winston.createLogger({
-  level: "debug",
+  level: "info",
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
@@ -18,7 +17,6 @@ const logger = winston.createLogger({
   ),
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
-    // Write all logs to plugin log file
     new winston.transports.File({ 
       filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
       level: "error"
@@ -26,12 +24,12 @@ const logger = winston.createLogger({
     new winston.transports.File({ 
       filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log")
     }),
-    // Also log to console
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize(),
         winston.format.simple()
-      )
+      ),
+      level: "warn"
     })
   ],
 });
@@ -74,140 +72,118 @@ const configSchema: ConfigSchema = {
 };
 
 const DISCORD_LIMIT = 2000;
-const IDLE_TIMEOUT_MS = 600;
-const MAX_MESSAGE_CHARS = 1800;
+const IDLE_TIMEOUT_MS = 500; // Send message after 500ms of no new tokens
 
-interface StreamState {
-  channel: Message["channel"];
+interface ActiveStream {
+  channel: TextChannel | ThreadChannel | DMChannel;
   replyTo: Message;
-  messages: Message[];
-  currentBuffer: string;
-  lastTokenTime: number;
+  activeMessage: Message | null; // The ONE message we're currently editing
+  buffer: string;
+  lastEditLength: number; // How much of buffer we've sent to Discord
   idleTimer: NodeJS.Timeout | null;
-  isFirstMessage: boolean;
-  sessionKey: string;
+  isComplete: boolean;
 }
 
-const streams = new Map<string, StreamState>();
+const activeStreams = new Map<string, ActiveStream>();
 
-async function flushCurrentMessage(state: StreamState, force: boolean = false) {
-  logger.debug({ msg: "flushCurrentMessage called", sessionKey: state.sessionKey, bufferLength: state.currentBuffer.length, force });
+async function updateActiveMessage(stream: ActiveStream) {
+  if (stream.isComplete) return;
   
-  if (!state.currentBuffer.trim()) {
-    logger.debug({ msg: "Empty buffer, skipping flush", sessionKey: state.sessionKey });
-    return;
-  }
+  const content = stream.buffer.trim();
+  if (!content) return;
   
-  const text = state.currentBuffer.trim();
-  logger.debug({ msg: "Flushing message", sessionKey: state.sessionKey, textLength: text.length, isFirstMessage: state.isFirstMessage });
+  // Don't update if nothing new to show
+  if (content.length <= stream.lastEditLength) return;
   
   try {
-    if (state.isFirstMessage && state.messages.length === 0) {
-      logger.info({ msg: "Sending first message as reply", sessionKey: state.sessionKey, textLength: text.length });
-      const msg = await state.replyTo.reply(text.slice(0, DISCORD_LIMIT));
-      state.messages.push(msg);
-      state.isFirstMessage = false;
-      logger.info({ msg: "First message sent successfully", sessionKey: state.sessionKey, messageId: msg.id });
-    } else {
-      logger.info({ msg: "Sending follow-up message", sessionKey: state.sessionKey, textLength: text.length });
-      const msg = await sendToChannel(state.channel, text.slice(0, DISCORD_LIMIT));
-      if (msg) {
-        state.messages.push(msg);
-        logger.info({ msg: "Follow-up message sent", sessionKey: state.sessionKey, messageId: msg.id });
+    if (!stream.activeMessage) {
+      // Create new message (first one is a reply, rest are channel sends)
+      const isFirstMessage = stream.lastEditLength === 0;
+      if (isFirstMessage) {
+        logger.info({ msg: "Creating reply message", contentLength: content.length });
+        stream.activeMessage = await stream.replyTo.reply(content.slice(0, DISCORD_LIMIT));
+      } else {
+        logger.info({ msg: "Creating follow-up message", contentLength: content.length });
+        stream.activeMessage = await (stream.channel as TextChannel | ThreadChannel | DMChannel).send(content.slice(0, DISCORD_LIMIT));
       }
+      stream.lastEditLength = content.length;
+    } else if (content.length <= DISCORD_LIMIT) {
+      // Update existing message
+      await stream.activeMessage.edit(content);
+      stream.lastEditLength = content.length;
+    } else {
+      // Would exceed limit - finalize current and start new
+      logger.info({ msg: "Message would exceed limit, starting new", currentLength: stream.lastEditLength, newContent: content.length });
+      stream.activeMessage = null;
+      stream.lastEditLength = 0;
+      stream.buffer = content; // Keep full buffer for new message
+      await updateActiveMessage(stream);
     }
-    state.currentBuffer = "";
   } catch (error) {
-    logger.error({ msg: "Failed to send message", sessionKey: state.sessionKey, error: String(error), stack: error instanceof Error ? error.stack : undefined });
-    throw error;
+    logger.error({ msg: "Failed to update message", error: String(error) });
   }
 }
 
-async function sendToChannel(channel: Message["channel"], text: string): Promise<Message | undefined> {
-  if (channel.isTextBased() && "send" in channel) {
-    return await (channel as TextChannel | ThreadChannel | DMChannel).send(text);
+function finalizeMessage(stream: ActiveStream) {
+  if (stream.isComplete) return;
+  stream.isComplete = true;
+  
+  if (stream.idleTimer) {
+    clearTimeout(stream.idleTimer);
+    stream.idleTimer = null;
   }
-  return undefined;
+  
+  // One final update
+  updateActiveMessage(stream).catch(() => {});
+  
+  logger.info({ msg: "Message finalized", finalLength: stream.buffer.length });
 }
 
-function resetIdleTimer(sessionKey: string, state: StreamState) {
-  logger.debug({ msg: "Resetting idle timer", sessionKey, bufferLength: state.currentBuffer.length });
+function scheduleIdleCheck(sessionKey: string, stream: ActiveStream) {
+  if (stream.idleTimer) clearTimeout(stream.idleTimer);
   
-  if (state.idleTimer) {
-    clearTimeout(state.idleTimer);
-    state.idleTimer = null;
-  }
-  
-  state.idleTimer = setTimeout(() => {
-    logger.info({ msg: "Idle timeout fired", sessionKey, bufferLength: state.currentBuffer.length });
-    flushCurrentMessage(state, true).then(() => {
-      logger.debug({ msg: "Idle flush complete", sessionKey });
-    }).catch((error) => {
-      logger.error({ msg: "Idle flush failed", sessionKey, error: String(error) });
-    });
+  stream.idleTimer = setTimeout(() => {
+    logger.info({ msg: "Idle timeout - finalizing message", sessionKey, bufferLength: stream.buffer.length });
+    finalizeMessage(stream);
   }, IDLE_TIMEOUT_MS);
 }
 
-async function handleStream(msg: StreamMessage, sessionKey: string) {
-  logger.debug({ msg: "handleStream called", sessionKey, msgType: msg.type, hasContent: !!msg.content });
+async function handleStreamChunk(msg: StreamMessage, sessionKey: string) {
+  if (msg.type !== "text" || !msg.content) return;
   
-  if (msg.type !== "text" || !msg.content) {
-    logger.debug({ msg: "Skipping non-text message", sessionKey, msgType: msg.type });
-    return;
+  const stream = activeStreams.get(sessionKey);
+  if (!stream || stream.isComplete) return;
+  
+  // If we have an active message, check if we should start a new one
+  // (this happens after a temporal gap when the previous message was finalized)
+  if (stream.activeMessage && stream.isComplete) {
+    // Previous message was finalized, start fresh
+    stream.activeMessage = null;
+    stream.lastEditLength = 0;
+    stream.buffer = "";
+    stream.isComplete = false;
   }
   
-  const state = streams.get(sessionKey);
-  if (!state) {
-    logger.error({ msg: "No stream state found", sessionKey });
-    return;
-  }
+  // Append content
+  stream.buffer += msg.content;
   
-  state.lastTokenTime = Date.now();
+  // Update the active message
+  await updateActiveMessage(stream);
   
-  const text = msg.content;
-  
-  // Just concatenate - don't add spaces. The AI's streaming includes proper spacing.
-  state.currentBuffer += text;
-  logger.debug({ msg: "Added to buffer", sessionKey, addedLength: text.length, bufferLength: state.currentBuffer.length });
-  
-  // Flush if buffer is getting large (every ~1000 chars or near Discord limit)
-  if (state.currentBuffer.length >= 1000) {
-    logger.info({ msg: "Buffer reached threshold, flushing early", sessionKey, bufferLength: state.currentBuffer.length });
-    // Clear timer since we're flushing now
-    if (state.idleTimer) {
-      clearTimeout(state.idleTimer);
-      state.idleTimer = null;
-    }
-    // Fire and forget - don't block streaming
-    flushCurrentMessage(state, false).catch((err) => {
-      logger.error({ msg: "Early flush failed", sessionKey, error: String(err) });
-    });
-  } else {
-    resetIdleTimer(sessionKey, state);
-  }
+  // Reset idle timer
+  scheduleIdleCheck(sessionKey, stream);
 }
 
 async function handleMessage(message: Message) {
-  logger.info({ msg: "handleMessage called", messageId: message.id, author: message.author.username, content: message.content.slice(0, 100) });
-  
-  if (!client || !ctx) {
-    logger.error({ msg: "Client or ctx not initialized" });
-    return;
-  }
-  if (message.author.bot) {
-    logger.debug({ msg: "Ignoring bot message" });
-    return;
-  }
-  if (!client.user) {
-    logger.error({ msg: "Client user not available" });
-    return;
-  }
+  if (!client || !ctx) return;
+  if (message.author.bot) return;
+  if (!client.user) return;
 
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
   
-  logger.debug({ msg: "Message check", isDirectlyMentioned, isDM, channelType: message.channel.type });
-  
+  if (!isDirectlyMentioned && !isDM) return;
+
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
   
   let messageContent = message.content;
@@ -217,57 +193,40 @@ async function handleMessage(message: Message) {
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  const shouldRespond = isDirectlyMentioned || isDM;
-  
   try {
     ctx.logMessage(
       `discord-${message.channel.id}`,
       `${authorDisplayName}: ${message.content}`,
       { from: authorDisplayName, channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name } }
     );
-  } catch (e) {
-    logger.error({ msg: "logMessage failed", error: String(e) });
-  }
-  
-  if (!shouldRespond) {
-    logger.debug({ msg: "Not responding - not mentioned and not DM" });
-    return;
-  }
+  } catch (e) {}
 
   try {
     await message.react("👀");
-    logger.debug({ msg: "Added eyes reaction" });
-  } catch (e) {
-    logger.error({ msg: "Failed to add eyes reaction", error: String(e) });
-  }
+  } catch (e) {}
   
   const sessionKey = `discord-${message.channel.id}`;
-  logger.info({ msg: "Starting new stream", sessionKey, messageContent: messageContent.slice(0, 100) });
   
   // Clean up any existing stream
-  const existing = streams.get(sessionKey);
-  if (existing?.idleTimer) {
-    clearTimeout(existing.idleTimer);
-    logger.debug({ msg: "Cleared existing idle timer", sessionKey });
-  }
-  streams.delete(sessionKey);
+  const existing = activeStreams.get(sessionKey);
+  if (existing?.idleTimer) clearTimeout(existing.idleTimer);
+  activeStreams.delete(sessionKey);
   
-  // Create new stream state
-  const state: StreamState = {
-    channel: message.channel,
+  // Create new stream
+  const stream: ActiveStream = {
+    channel: message.channel as TextChannel | ThreadChannel | DMChannel,
     replyTo: message,
-    messages: [],
-    currentBuffer: "",
-    lastTokenTime: Date.now(),
+    activeMessage: null,
+    buffer: "",
+    lastEditLength: 0,
     idleTimer: null,
-    isFirstMessage: true,
-    sessionKey,
+    isComplete: false,
   };
-  streams.set(sessionKey, state);
+  activeStreams.set(sessionKey, stream);
+  
+  logger.info({ msg: "Starting new stream", sessionKey, messageContent: messageContent.slice(0, 100) });
   
   try {
-    logger.info({ msg: "Calling ctx.inject", sessionKey });
-    
     await ctx.inject(
       sessionKey,
       messageContent,
@@ -275,47 +234,33 @@ async function handleMessage(message: Message) {
         from: authorDisplayName,
         channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name },
         onStream: (msg: StreamMessage) => {
-          handleStream(msg, sessionKey).catch((error) => {
-            logger.error({ msg: "handleStream error", sessionKey, error: String(error) });
+          handleStreamChunk(msg, sessionKey).catch((err) => {
+            logger.error({ msg: "Stream chunk error", sessionKey, error: String(err) });
           });
         }
       }
     );
     
-    logger.info({ msg: "ctx.inject completed", sessionKey });
-    
-    // Injection complete - flush any remaining content
-    if (state.idleTimer) {
-      clearTimeout(state.idleTimer);
-      state.idleTimer = null;
-    }
-    
-    logger.info({ msg: "Flushing final message", sessionKey, bufferLength: state.currentBuffer.length });
-    await flushCurrentMessage(state, true);
-    streams.delete(sessionKey);
+    // Injection complete - finalize
+    logger.info({ msg: "Injection complete, finalizing", sessionKey, finalBufferLength: stream.buffer.length });
+    finalizeMessage(stream);
+    activeStreams.delete(sessionKey);
     
     try {
       await message.reactions.cache.get("👀")?.users.remove(client.user.id);
       await message.react("✅");
-      logger.info({ msg: "Added checkmark reaction", sessionKey });
-    } catch (e) {
-      logger.error({ msg: "Failed to update reactions", sessionKey, error: String(e) });
-    }
+    } catch (e) {}
     
   } catch (error: any) {
-    logger.error({ msg: "ctx.inject failed", sessionKey, error: String(error), stack: error?.stack });
+    logger.error({ msg: "Injection failed", sessionKey, error: String(error) });
     
-    if (state.idleTimer) {
-      clearTimeout(state.idleTimer);
-    }
-    streams.delete(sessionKey);
+    if (stream.idleTimer) clearTimeout(stream.idleTimer);
+    activeStreams.delete(sessionKey);
     
     try {
       await message.reactions.cache.get("👀")?.users.remove(client.user.id);
       await message.react("❌");
-    } catch (e) {
-      logger.error({ msg: "Failed to add error reaction", error: String(e) });
-    }
+    } catch (e) {}
     
     await message.reply("Error processing your request.");
   }
@@ -323,41 +268,23 @@ async function handleMessage(message: Message) {
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.3.0",
-  description: "Discord bot integration for WOPR with proper logging",
+  version: "2.4.0",
+  description: "Discord bot with proper streaming",
 
   async init(context: WOPRPluginContext) {
-    logger.info({ msg: "Plugin init started" });
     ctx = context;
-    
-    // Ensure log directory exists
-    const logDir = path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs");
-    try {
-      await import("fs/promises").then(fs => fs.mkdir(logDir, { recursive: true }));
-      logger.info({ msg: "Log directory ensured", logDir });
-    } catch (e) {
-      logger.error({ msg: "Failed to create log directory", logDir, error: String(e) });
-    }
-    
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
-    logger.info({ msg: "Config schema registered" });
 
     let config = ctx.getConfig<{token?: string; guildId?: string}>();
-    logger.info({ msg: "Got plugin config", hasToken: !!config?.token });
-
     if (!config?.token) {
       const legacyConfig = ctx.getMainConfig("discord") as {token?: string; guildId?: string};
-      logger.info({ msg: "Checking legacy config", hasToken: !!legacyConfig?.token });
       if (legacyConfig?.token) {
-        config = { 
-          token: legacyConfig.token, 
-          guildId: legacyConfig.guildId,
-        };
+        config = { token: legacyConfig.token, guildId: legacyConfig.guildId };
       }
     }
 
     if (!config?.token) {
-      logger.warn({ msg: "Discord not configured - no token found" });
+      logger.warn("Discord not configured");
       return;
     }
 
@@ -372,36 +299,25 @@ const plugin: WOPRPlugin = {
     });
 
     client.on(Events.MessageCreate, (msg) => {
-      handleMessage(msg).catch((error) => {
-        logger.error({ msg: "Unhandled error in handleMessage", error: String(error), stack: error?.stack });
-      });
+      handleMessage(msg).catch((err) => logger.error({ msg: "Message handler error", error: String(err) }));
     });
     
     client.on(Events.ClientReady, () => {
-      logger.info({ msg: "Discord bot logged in", tag: client?.user?.tag });
-    });
-    
-    client.on(Events.Error, (error) => {
-      logger.error({ msg: "Discord client error", error: String(error) });
+      logger.info({ msg: "Bot logged in", tag: client?.user?.tag });
     });
 
     try {
       await client.login(config.token);
-      logger.info({ msg: "Discord bot started successfully" });
+      logger.info("Discord bot started");
     } catch (error: any) {
-      logger.error({ msg: "Failed to start Discord bot", error: String(error), stack: error?.stack });
+      logger.error({ msg: "Failed to start bot", error: String(error) });
       throw error;
     }
   },
 
   async shutdown() {
-    logger.info({ msg: "Plugin shutdown started" });
-    if (client) {
-      await client.destroy();
-      logger.info({ msg: "Discord client destroyed" });
-    }
-    ctx?.log.info("Discord plugin shut down");
-    logger.info({ msg: "Plugin shutdown complete" });
+    if (client) await client.destroy();
+    logger.info("Plugin shut down");
   },
 };
 
