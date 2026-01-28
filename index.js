@@ -288,6 +288,113 @@ Be helpful but brief.`;
 // Message Handling
 // ============================================================================
 
+async function resolveMentions(content, guild) {
+  // Replace user mentions <@userId> with @username
+  content = content.replace(/<@!?(\d+)>/g, (match, userId) => {
+    // Try to get user from cache
+    const user = client.users.cache.get(userId);
+    if (user) {
+      return `@${user.username}`;
+    }
+    // Try to get member from guild
+    if (guild) {
+      const member = guild.members.cache.get(userId);
+      if (member) {
+        return `@${member.user.username}`;
+      }
+    }
+    return '@unknown';
+  });
+  
+  // Replace role mentions <@&roleId> with @roleName
+  content = content.replace(/<@&(\d+)>/g, (match, roleId) => {
+    if (guild) {
+      const role = guild.roles.cache.get(roleId);
+      if (role) {
+        return `@${role.name}`;
+      }
+    }
+    return '@unknown-role';
+  });
+  
+  // Replace channel mentions <#channelId> with #channelName
+  content = content.replace(/<#(\d+)>/g, (match, channelId) => {
+    if (guild) {
+      const channel = guild.channels.cache.get(channelId);
+      if (channel) {
+        return `#${channel.name}`;
+      }
+    }
+    return '#unknown-channel';
+  });
+  
+  return content;
+}
+
+async function formatOutgoingMentions(content, guild) {
+  // Replace @username with <@userId> for Discord mentions
+  // Match @username or @user.name (with word boundaries)
+  if (guild) {
+    // Try to find users by username
+    const usernamePattern = /@([\w.]+)/g;
+    const matches = [...content.matchAll(usernamePattern)];
+    
+    for (const match of matches) {
+      const username = match[1];
+      
+      // Try to find member by username or display name
+      const member = guild.members.cache.find(m => 
+        m.user.username.toLowerCase() === username.toLowerCase() ||
+        m.displayName.toLowerCase() === username.toLowerCase()
+      );
+      
+      if (member) {
+        content = content.replace(match[0], `<@${member.user.id}>`);
+      }
+    }
+  }
+  
+  // Replace @roleName with <@&roleId> for role mentions
+  if (guild) {
+    const rolePattern = /@([\w\s]+)(?=\s|$|[^\w\s])/g;
+    const matches = [...content.matchAll(rolePattern)];
+    
+    for (const match of matches) {
+      const roleName = match[1].trim();
+      
+      // Try to find role by name
+      const role = guild.roles.cache.find(r => 
+        r.name.toLowerCase() === roleName.toLowerCase()
+      );
+      
+      if (role) {
+        content = content.replace(match[0], `<@&${role.id}>`);
+      }
+    }
+  }
+  
+  // Replace #channelName with <#channelId> for channel mentions
+  if (guild) {
+    const channelPattern = /#([\w-]+)/g;
+    const matches = [...content.matchAll(channelPattern)];
+    
+    for (const match of matches) {
+      const channelName = match[1];
+      
+      // Try to find channel by name
+      const channel = guild.channels.cache.find(c => 
+        c.name.toLowerCase() === channelName.toLowerCase()
+      );
+      
+      if (channel) {
+        content = content.replace(match[0], `<#${channel.id}>`);
+      }
+    }
+  }
+  
+  return content;
+}
+
 async function handleMessage(message) {
   if (message.author.bot) return;
 
@@ -353,18 +460,50 @@ async function handleMessage(message) {
     }
   }
 
-  // Clean up the message
-  let content = message.content;
+  // Clean up and resolve mentions in the message
+  let content = await resolveMentions(message.content, message.guild);
+  
+  // Remove bot mention prefix if present
   if (isMentioned) {
-    content = content.replace(/<@!?\d+>/g, "").trim();
+    content = content.replace(new RegExp(`@?${client.user.username}\\s*`, 'i'), "").trim();
   }
 
-  if (!content) return;
+  // Collect image attachments
+  const imageAttachments = [];
+  if (message.attachments.size > 0) {
+    for (const [, attachment] of message.attachments) {
+      // Check if it's an image
+      if (attachment.contentType?.startsWith('image/')) {
+        imageAttachments.push({
+          url: attachment.url,
+          name: attachment.name,
+          contentType: attachment.contentType,
+          width: attachment.width,
+          height: attachment.height,
+        });
+      }
+    }
+  }
+
+  // Build the prompt
+  let promptText = `[${message.author.username}]: ${content}`;
+  
+  // Add image descriptions to the prompt
+  if (imageAttachments.length > 0) {
+    promptText += `\n\n[Attached images: ${imageAttachments.map(img => img.name).join(', ')}]`;
+  }
+
+  if (!content && imageAttachments.length === 0) return;
 
   // Show typing
   await message.channel.sendTyping();
 
-  const prompt = `[${message.author.username}]: ${content}`;
+  const prompt = {
+    text: promptText,
+    images: imageAttachments.map(img => img.url),
+    author: message.author.username,
+    originalContent: content,
+  };
   ctx.log.info(`${message.author.tag} -> ${session}: ${content.substring(0, 50)}...`);
 
   try {
@@ -392,8 +531,11 @@ async function handleMessage(message) {
       // Rate limit sends unless forced (complete/error)
       if (!force && now - lastSendTime < minSendInterval) return;
 
+      // Convert @username mentions to Discord mentions
+      const formattedText = await formatOutgoingMentions(textBuffer, message.guild);
+
       // Chunk for Discord's 2000 char limit
-      const chunks = textBuffer.match(/[\s\S]{1,1990}/g) || [];
+      const chunks = formattedText.match(/[\s\S]{1,1990}/g) || [];
       for (const chunk of chunks) {
         if (!repliedOnce) {
           await message.reply(chunk);
@@ -942,8 +1084,12 @@ Discord Bot Setup
       try {
         const channel = await client.channels.fetch(channelId);
         if (channel && response) {
+          // Convert @username mentions to Discord mentions
+          const guild = channel.guild;
+          const formattedResponse = await formatOutgoingMentions(response, guild);
+          
           // Chunk for Discord's 2000 char limit
-          const chunks = response.match(/[\s\S]{1,1990}/g) || [];
+          const chunks = formattedResponse.match(/[\s\S]{1,1990}/g) || [];
           for (const chunk of chunks) {
             await channel.send(`**[${session}]** ${chunk}`);
           }
