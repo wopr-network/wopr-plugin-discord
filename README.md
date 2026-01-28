@@ -1,194 +1,132 @@
 # WOPR Discord Plugin
 
-Talk to your WOPR sessions via Discord, with pairing and access control.
+Discord bot integration for WOPR - enables AI conversations in Discord channels with full context awareness.
 
 ## Features
 
-- **User-initiated pairing** - Users request access, owner approves
-- **Access control** - Block/grant per-user, per-session
-- **Channel mapping** - Route Discord channels to WOPR sessions
-- **Auto-create** - Automatically create sessions for new channels
+- **@mention responses** - Bot responds when mentioned
+- **Reaction feedback** - 👀 (processing) → ✅ (done) or ❌ (error)
+- **Full conversation context** - Captures all channel messages for context
+- **@everyone/@here ignored** - Only responds to direct mentions
+- **Per-channel sessions** - Each Discord channel has its own WOPR session
+- **TypeScript** - Written in TypeScript with full type support
 
 ## Installation
 
 ```bash
-wopr plugin install github:wopr/wopr-plugin-discord
+wopr plugin install github:TSavo/wopr-plugin-discord
+wopr plugin enable wopr-plugin-discord
 ```
 
-## Quick Start
+## Configuration
+
+Set your Discord bot token:
 
 ```bash
-# 1. Set up the bot
-wopr discord auth
-
-# 2. Restart daemon
-wopr daemon stop && wopr daemon start
-
-# 3. Invite bot to your server (URL shown after auth)
-
-# 4. Set access policy to require pairing
-wopr discord access paired
+wopr config set discord.token YOUR_BOT_TOKEN
 ```
 
-## How Pairing Works
-
-1. **User @mentions the bot** in Discord
-2. **Bot replies with a pairing code:**
-   ```
-   Hi Alice! I don't recognize you yet.
-
-   Your pairing code is: ABCD1234
-
-   Ask the owner to run: wopr discord pair approve ABCD1234
-   ```
-3. **User tells owner the code** (DM, text, whatever)
-4. **Owner approves:**
-   ```bash
-   wopr discord pair approve ABCD1234
-   ```
-5. **User can now talk to the bot**
-
-The approval automatically grants access to the session they tried to use.
-
-## Access Policies
+Or via the plugin config:
 
 ```bash
-wopr discord access all      # Anyone can use (default)
-wopr discord access paired   # Only approved users (recommended)
-wopr discord access none     # Only explicitly granted users
+wopr config set plugins.data.wopr-plugin-discord.token YOUR_BOT_TOKEN
 ```
 
-## Pairing Commands
+## Discord Bot Setup
 
-```bash
-# List pending requests
-wopr discord pair list
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application
+3. Go to "Bot" section
+4. Enable "MESSAGE CONTENT INTENT"
+5. Enable "SERVER MEMBERS INTENT"
+6. Copy the bot token
+7. Add the bot to your server via OAuth2 URL Generator
 
-# Approve (grants access to the session they tried to use)
-wopr discord pair approve ABCD1234
+## Usage
 
-# Approve with extra sessions
-wopr discord pair approve ABCD1234 mybot,helper
+Once configured and the daemon is running:
 
-# Reject a request
-wopr discord pair reject ABCD1234 "not authorized"
-
-# View all requests (including approved/rejected)
-wopr discord pair history
+```
+@WOPR Hello! What's your name?
 ```
 
-## User Management
+The bot will:
+1. Add 👀 reaction (processing)
+2. Send message to WOPR session
+3. Get AI response
+4. Remove 👀, add ✅
+5. Reply with the response
 
-```bash
-# List paired users
-wopr discord users
+### Conversation Context
 
-# Grant access directly (bypass pairing)
-wopr discord grant 123456789 mybot,helper --name "Alice"
+The plugin captures **all** messages in the channel (not just @mentions) and logs them to the session context. This means:
 
-# Revoke access
-wopr discord revoke 123456789 mybot    # Specific session
-wopr discord revoke 123456789          # All sessions
-
-# Block/unblock
-wopr discord block 123456789 "spam"
-wopr discord unblock 123456789
+```
+User: My name is Alice
+User: @WOPR What's my name?
+Bot: Your name is Alice!
 ```
 
-## Channel Mapping
+The bot sees the full conversation history.
 
-```bash
-# Map channel to session
-wopr discord map 123456789 mybot
+## How It Works
 
-# Respond to ALL messages (not just @mentions)
-wopr discord map 123456789 mybot --all
+### Message Handling
 
-# Restrict to specific users in that channel
-wopr discord map 123456789 mybot --users 111,222,333
+| Message Type | Action |
+|--------------|--------|
+| Direct @mention | Respond + log to context |
+| @everyone/@here | Ignored (not a direct mention) |
+| Regular message | Log to context only |
 
-# List mappings
-wopr discord mappings
+### Session Mapping
 
-# Remove mapping
-wopr discord unmap 123456789
+Each Discord channel maps to a WOPR session:
+- Channel `#general` → Session `discord-<channel-id>`
+- Sessions are auto-created on first use
+- Context persists across restarts
+
+### Reactions
+
+- **👀** - Processing (added immediately)
+- **✅** - Success (replaces 👀)
+- **❌** - Error (replaces 👀)
+
+## Plugin API
+
+This plugin demonstrates the WOPR plugin API:
+
+```typescript
+// Inject (gets AI response)
+const response = await ctx.inject(
+  sessionId,
+  message,
+  { from: username, channel: {...} }
+);
+
+// Log (adds to context without AI response)
+ctx.logMessage(
+  sessionId,
+  message,
+  { from: username }
+);
 ```
-
-### Auto-Create Mode
-
-```bash
-wopr discord auto on    # Unmapped channels get sessions automatically
-wopr discord auto off   # Only mapped channels work
-```
-
-## Config File
-
-Stored in `~/.wopr/plugins/discord/config.json`:
-
-```json
-{
-  "token": "your-bot-token",
-  "autoCreate": true,
-  "defaultAccess": "paired",
-  "mappings": {
-    "123456789": {
-      "session": "mybot",
-      "respondToAll": false
-    }
-  },
-  "users": {
-    "372912494030749706": {
-      "name": "Alice",
-      "sessions": ["mybot"],
-      "pairedAt": 1706123456789,
-      "pairedWith": "ABCD1234"
-    }
-  },
-  "pairingRequests": {
-    "ABCD1234": {
-      "userId": "372912494030749706",
-      "userName": "Alice",
-      "channelName": "general",
-      "guildName": "My Server",
-      "status": "approved",
-      "createdAt": 1706123456789,
-      "approvedAt": 1706123556789,
-      "sessions": ["mybot"]
-    }
-  }
-}
-```
-
-## Commands Reference
-
-| Command | Description |
-|---------|-------------|
-| `wopr discord auth` | Set up bot token |
-| `wopr discord status` | Show connection status |
-| `wopr discord access [policy]` | Set default access (all/paired/none) |
-| `wopr discord pair list` | List pending pairing requests |
-| `wopr discord pair approve <code> [sessions]` | Approve request |
-| `wopr discord pair reject <code> [reason]` | Reject request |
-| `wopr discord pair history` | Show all requests |
-| `wopr discord users` | List paired users |
-| `wopr discord grant <user> <sessions>` | Grant access |
-| `wopr discord revoke <user> [sessions]` | Revoke access |
-| `wopr discord block <user> [reason]` | Block user |
-| `wopr discord unblock <user>` | Unblock user |
-| `wopr discord map <channel> <session>` | Map channel |
-| `wopr discord unmap <channel>` | Unmap channel |
-| `wopr discord mappings` | List mappings |
-| `wopr discord auto [on\|off]` | Auto-create mode |
 
 ## Troubleshooting
 
 **Bot doesn't respond:**
-- Check `wopr discord status`
-- Is the daemon running? `wopr daemon status`
-- Is the user paired? `wopr discord users`
+- Check daemon is running: `wopr daemon status`
+- Check logs: `wopr daemon logs`
+- Verify token: `wopr config get discord.token`
 
-**User gets pairing prompt every time:**
-- Owner needs to approve: `wopr discord pair list` then `approve`
+**Bot responds to @everyone:**
+- Make sure you're using a recent version (v2.0.7+)
+- The bot checks `message.mentions.users.has(botId)`
 
-**"MESSAGE CONTENT INTENT" error:**
-- Discord Developer Portal → Bot → Enable "MESSAGE CONTENT INTENT"
+**No conversation context:**
+- Check `wopr session show discord-<channel-id>`
+- Verify messages are being logged to conversation history
+
+## License
+
+MIT
