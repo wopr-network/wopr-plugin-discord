@@ -165,18 +165,10 @@ async function handleStream(msg: StreamMessage, sessionKey: string) {
   state.lastTokenTime = Date.now();
   
   const text = msg.content;
-  const needsSpace = state.currentBuffer.length > 0 && 
-    !state.currentBuffer.endsWith(" ") && 
-    !state.currentBuffer.endsWith("\n") &&
-    !text.startsWith(" ") &&
-    !text.startsWith("\n") &&
-    !text.startsWith(",") &&
-    !text.startsWith(".") &&
-    !text.startsWith("!") &&
-    !text.startsWith("?");
   
-  state.currentBuffer += (needsSpace ? " " : "") + text;
-  logger.debug({ msg: "Added to buffer", sessionKey, addedLength: text.length, bufferLength: state.currentBuffer.length, needsSpace });
+  // Just concatenate - don't add spaces. The AI's streaming includes proper spacing.
+  state.currentBuffer += text;
+  logger.debug({ msg: "Added to buffer", sessionKey, addedLength: text.length, bufferLength: state.currentBuffer.length });
   
   // Flush if buffer is getting large (every ~1000 chars or near Discord limit)
   if (state.currentBuffer.length >= 1000) {
