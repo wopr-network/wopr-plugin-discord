@@ -1,6 +1,6 @@
 /**
- * WOPR Discord Plugin
- * Proper streaming with single active message
+ * WOPR Discord Plugin - Fixed streaming
+ * ONE active message, edit every 800 chars, split at 2000, new message on 1s gap
  */
 
 import { Client, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, DMChannel } from "discord.js";
@@ -10,21 +10,12 @@ import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage } from 
 
 const logger = winston.createLogger({
   level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
+  format: winston.format.combine(winston.format.timestamp(), winston.format.errors({ stack: true }), winston.format.json()),
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
-    new winston.transports.File({ 
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
-      level: "error"
-    }),
-    new winston.transports.File({ 
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log")
-    }),
-    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), winston.format.simple()), level: "warn" })
+    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"), level: "error" }),
+    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log") }),
+    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), winston.format.simple()), level: "warn" }),
   ],
 });
 
@@ -43,139 +34,139 @@ const configSchema: ConfigSchema = {
 };
 
 const DISCORD_LIMIT = 2000;
-const EDIT_THRESHOLD = 800;     // Edit every ~800 chars
-const IDLE_TIMEOUT_MS = 1000;   // New message after 1 second idle
+const EDIT_THRESHOLD = 800;  // Edit Discord message every 800 new chars
+const IDLE_SPLIT_MS = 1000;  // Split to new message after 1 second of no tokens
 
 interface StreamState {
   channel: TextChannel | ThreadChannel | DMChannel;
   replyTo: Message;
-  message: Message | null;      // Current message being edited
-  buffer: string;               // Accumulated content
-  sentLength: number;           // How much we've sent to Discord
-  lastTokenTime: number;
-  editTimer: NodeJS.Timeout | null;
-  idleTimer: NodeJS.Timeout | null;
-  isReply: boolean;             // Is this the first message (a reply)?
+  message: Message | null;
+  buffer: string;
+  lastUpdateTime: number;
+  lastEditLength: number;
+  isReply: boolean;
+  isFinalized: boolean;
 }
 
 const streams = new Map<string, StreamState>();
 
-async function sendOrEdit(state: StreamState) {
+async function updateMessage(state: StreamState): Promise<void> {
+  if (state.isFinalized || !state.buffer.trim()) return;
+  
   const content = state.buffer.trim();
-  if (!content) return;
   
-  // Check if we need to split (hit Discord limit)
-  if (content.length > DISCORD_LIMIT) {
-    // Finalize current content
-    if (state.message) {
-      try {
-        await state.message.edit(content.slice(0, DISCORD_LIMIT));
-        state.sentLength = DISCORD_LIMIT;
-      } catch (e) {
-        logger.error({ msg: "Edit failed", error: String(e) });
-      }
-    } else {
-      // Create first part as reply or channel message
-      try {
-        if (state.isReply) {
-          state.message = await state.replyTo.reply(content.slice(0, DISCORD_LIMIT));
-          state.isReply = false;
-        } else {
-          state.message = await state.channel.send(content.slice(0, DISCORD_LIMIT));
-        }
-        state.sentLength = DISCORD_LIMIT;
-      } catch (e) {
-        logger.error({ msg: "Send failed", error: String(e) });
-        return;
-      }
-    }
-    
-    // Start new message with remaining content
-    const remaining = content.slice(DISCORD_LIMIT);
-    state.buffer = remaining;
-    state.sentLength = 0;
-    state.message = null;
-    
-    // Recursively send remaining
-    await sendOrEdit(state);
-    return;
-  }
-  
-  // Normal case - content fits in one message
   try {
     if (!state.message) {
       // Create new message
       if (state.isReply) {
-        state.message = await state.replyTo.reply(content);
+        state.message = await state.replyTo.reply(content.slice(0, DISCORD_LIMIT));
         state.isReply = false;
       } else {
-        state.message = await state.channel.send(content);
+        state.message = await state.channel.send(content.slice(0, DISCORD_LIMIT));
       }
-    } else {
-      // Edit existing
+      state.lastEditLength = content.length;
+    } else if (content.length <= DISCORD_LIMIT) {
+      // Edit existing message
       await state.message.edit(content);
+      state.lastEditLength = content.length;
     }
-    state.sentLength = content.length;
+    // If > DISCORD_LIMIT, we need to split - handled in handleChunk
   } catch (e) {
-    logger.error({ msg: "Send/Edit failed", error: String(e) });
+    logger.error({ msg: "Update failed", error: String(e) });
   }
-}
-
-function clearTimers(state: StreamState) {
-  if (state.editTimer) {
-    clearTimeout(state.editTimer);
-    state.editTimer = null;
-  }
-  if (state.idleTimer) {
-    clearTimeout(state.idleTimer);
-    state.idleTimer = null;
-  }
-}
-
-function scheduleEdit(sessionKey: string, state: StreamState) {
-  // Only schedule if not already scheduled
-  if (state.editTimer) return;
-  
-  state.editTimer = setTimeout(() => {
-    state.editTimer = null;
-    const newContent = state.buffer.slice(state.sentLength);
-    if (newContent.length > 0) {
-      sendOrEdit(state).catch((e) => logger.error({ msg: "Scheduled edit failed", error: String(e) }));
-    }
-  }, 100); // Small delay to batch rapid tokens
-}
-
-function startIdleTimer(sessionKey: string, state: StreamState) {
-  if (state.idleTimer) clearTimeout(state.idleTimer);
-  
-  state.idleTimer = setTimeout(() => {
-    logger.info({ msg: "Idle timeout - finalizing message", sessionKey, finalLength: state.buffer.length });
-    clearTimers(state);
-    // Mark as done - next tokens will create new message
-    streams.delete(sessionKey);
-  }, IDLE_TIMEOUT_MS);
 }
 
 async function handleChunk(msg: StreamMessage, sessionKey: string) {
   if (msg.type !== "text" || !msg.content) return;
   
-  const state = streams.get(sessionKey);
-  if (!state) return;
+  let state = streams.get(sessionKey);
+  if (!state) return; // Stream was cleaned up
   
-  state.lastTokenTime = Date.now();
+  if (state.isFinalized) {
+    // Previous message was finalized (idle gap), start fresh
+    state = {
+      channel: state.channel,
+      replyTo: state.replyTo,
+      message: null,
+      buffer: "",
+      lastUpdateTime: Date.now(),
+      lastEditLength: 0,
+      isReply: false, // Follow-up messages are not replies
+      isFinalized: false,
+    };
+    streams.set(sessionKey, state);
+    logger.info({ msg: "Started new message after idle gap", sessionKey });
+  }
+  
+  // Check for idle gap before adding new content
+  const now = Date.now();
+  const timeSinceLast = now - state.lastUpdateTime;
+  
+  if (timeSinceLast > IDLE_SPLIT_MS && state.buffer.length > 0) {
+    // Idle gap detected - finalize current and start new
+    logger.info({ msg: "Idle gap detected, splitting to new message", sessionKey, gapMs: timeSinceLast, bufferLength: state.buffer.length });
+    state.isFinalized = true;
+    
+    // Create new state for continuation
+    const newState: StreamState = {
+      channel: state.channel,
+      replyTo: state.replyTo,
+      message: null,
+      buffer: msg.content,
+      lastUpdateTime: now,
+      lastEditLength: 0,
+      isReply: false,
+      isFinalized: false,
+    };
+    streams.set(sessionKey, newState);
+    state = newState;
+    await updateMessage(state);
+    return;
+  }
+  
+  // Add content
   state.buffer += msg.content;
+  state.lastUpdateTime = now;
   
-  // Check if we should edit now (every ~800 new chars)
-  const newContent = state.buffer.slice(state.sentLength);
-  if (newContent.length >= EDIT_THRESHOLD) {
-    // Edit immediately
-    clearTimers(state);
-    await sendOrEdit(state);
-    startIdleTimer(sessionKey, state);
-  } else {
-    // Schedule edit
-    scheduleEdit(sessionKey, state);
-    startIdleTimer(sessionKey, state);
+  // Check if we need to split (hit Discord limit)
+  if (state.buffer.length > DISCORD_LIMIT) {
+    // Send what fits, keep rest for next message
+    const toSend = state.buffer.slice(0, DISCORD_LIMIT);
+    state.buffer = state.buffer.slice(DISCORD_LIMIT);
+    
+    logger.info({ msg: "Hit Discord limit, splitting", sessionKey, sentLength: toSend.length, remaining: state.buffer.length });
+    
+    // Finalize current message at limit
+    if (state.message) {
+      await state.message.edit(toSend);
+    } else {
+      state.message = state.isReply 
+        ? await state.replyTo.reply(toSend)
+        : await state.channel.send(toSend);
+      state.isReply = false;
+    }
+    state.isFinalized = true;
+    
+    // Create new state with remaining content
+    const newState: StreamState = {
+      channel: state.channel,
+      replyTo: state.replyTo,
+      message: null,
+      buffer: state.buffer,
+      lastUpdateTime: now,
+      lastEditLength: 0,
+      isReply: false,
+      isFinalized: false,
+    };
+    streams.set(sessionKey, newState);
+    await updateMessage(newState);
+    return;
+  }
+  
+  // Normal update check (every ~800 chars)
+  const newContent = state.buffer.length - state.lastEditLength;
+  if (newContent >= EDIT_THRESHOLD || !state.message) {
+    await updateMessage(state);
   }
 }
 
@@ -199,8 +190,7 @@ async function handleMessage(message: Message) {
   
   try {
     ctx.logMessage(`discord-${message.channel.id}`, `${authorDisplayName}: ${message.content}`, {
-      from: authorDisplayName,
-      channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name }
+      from: authorDisplayName, channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name }
     });
   } catch (e) {}
 
@@ -208,9 +198,7 @@ async function handleMessage(message: Message) {
   
   const sessionKey = `discord-${message.channel.id}`;
   
-  // Clean up existing stream for this session
-  const existing = streams.get(sessionKey);
-  if (existing) clearTimers(existing);
+  // Clean up any existing stream
   streams.delete(sessionKey);
   
   // Create new stream
@@ -219,11 +207,10 @@ async function handleMessage(message: Message) {
     replyTo: message,
     message: null,
     buffer: "",
-    sentLength: 0,
-    lastTokenTime: Date.now(),
-    editTimer: null,
-    idleTimer: null,
+    lastUpdateTime: Date.now(),
+    lastEditLength: 0,
     isReply: true,
+    isFinalized: false,
   };
   streams.set(sessionKey, state);
   
@@ -238,13 +225,12 @@ async function handleMessage(message: Message) {
       }
     });
     
-    // Injection done - finalize
+    // Finalize
     const finalState = streams.get(sessionKey);
-    if (finalState) {
-      clearTimers(finalState);
-      await sendOrEdit(finalState);
-      streams.delete(sessionKey);
+    if (finalState && !finalState.isFinalized) {
+      await updateMessage(finalState);
     }
+    streams.delete(sessionKey);
     
     try {
       await message.reactions.cache.get("👀")?.users.remove(client.user.id);
@@ -253,10 +239,7 @@ async function handleMessage(message: Message) {
     
   } catch (error: any) {
     logger.error({ msg: "Inject failed", error: String(error) });
-    const failState = streams.get(sessionKey);
-    if (failState) clearTimers(failState);
     streams.delete(sessionKey);
-    
     try {
       await message.reactions.cache.get("👀")?.users.remove(client.user.id);
       await message.react("❌");
@@ -267,8 +250,8 @@ async function handleMessage(message: Message) {
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.5.0",
-  description: "Discord bot with proper streaming",
+  version: "2.6.0",
+  description: "Discord bot with correct streaming",
 
   async init(context: WOPRPluginContext) {
     ctx = context;
@@ -280,17 +263,12 @@ const plugin: WOPRPlugin = {
       if (legacyConfig?.token) config = { token: legacyConfig.token, guildId: legacyConfig.guildId };
     }
 
-    if (!config?.token) {
-      logger.warn("Discord not configured");
-      return;
-    }
+    if (!config?.token) { logger.warn("Discord not configured"); return; }
 
     client = new Client({
       intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildMessageReactions,
       ],
     });
@@ -298,7 +276,6 @@ const plugin: WOPRPlugin = {
     client.on(Events.MessageCreate, (msg) => {
       handleMessage(msg).catch((e) => logger.error({ msg: "Handler error", error: String(e) }));
     });
-    
     client.on(Events.ClientReady, () => logger.info({ msg: "Bot logged in", tag: client?.user?.tag }));
 
     try {
