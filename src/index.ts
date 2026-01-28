@@ -44,109 +44,81 @@ const configSchema: ConfigSchema = {
 };
 
 const DISCORD_LIMIT = 2000;
-const EDIT_COALESCE_CHARS = 800;  // Edit every 800 chars
-const EDIT_COALESCE_MS = 500;     // Or every 500ms
+const EDIT_BATCH_SIZE = 600;  // Edit every 600 new chars
 
 // Track streaming state per session
 interface StreamState {
   channel: Message["channel"];
   replyTo: Message;
-  message: Message | null;  // Single message for both thinking and response
+  message: Message | null;
   buffer: string;
-  displayedLength: number;  // How much we've already sent to Discord
-  mode: "thinking" | "response";
-  flushTimer: NodeJS.Timeout | null;
-  isComplete: boolean;
+  lastEditLength: number;  // Buffer length at last Discord edit
+  pendingEdit: boolean;    // Is an edit currently pending?
 }
 
 const streams = new Map<string, StreamState>();
 
 async function updateDiscordMessage(state: StreamState) {
   if (!state.buffer.trim()) return;
+  if (state.pendingEdit) return; // Don't queue multiple edits
   
   const fullText = state.buffer.trim();
   
-  // Only update if we have new content to show
-  if (fullText.length <= state.displayedLength) return;
+  // Only update if we have substantial new content
+  if (fullText.length - state.lastEditLength < 50) return;
   
-  // Get just the new portion for appending
-  const newContent = fullText.slice(state.displayedLength);
+  state.pendingEdit = true;
   
   try {
     if (!state.message) {
-      // First message - create it
+      // First message
       const chunk = fullText.slice(0, DISCORD_LIMIT);
       state.message = await state.replyTo.reply(chunk);
-      state.displayedLength = chunk.length;
+      state.lastEditLength = chunk.length;
     } else if (fullText.length <= DISCORD_LIMIT) {
-      // Still fits in one message - edit it
+      // Still fits - edit in place
       await state.message.edit(fullText);
-      state.displayedLength = fullText.length;
+      state.lastEditLength = fullText.length;
     } else {
-      // Need to split into multiple messages
-      // Send remaining content as new messages
-      let remaining = fullText.slice(state.displayedLength);
-      
-      while (remaining.length > 0) {
-        const chunk = remaining.slice(0, DISCORD_LIMIT);
-        await sendToChannel(state.channel, chunk);
-        state.displayedLength += chunk.length;
-        remaining = remaining.slice(DISCORD_LIMIT);
+      // Would exceed limit - append as new message
+      const newContent = fullText.slice(state.lastEditLength);
+      if (newContent) {
+        await sendToChannel(state.channel, newContent.slice(0, DISCORD_LIMIT));
+        state.lastEditLength += newContent.length;
       }
     }
-  } catch (e) {
-    // Message might have been deleted
-  }
-}
-
-function scheduleUpdate(sessionKey: string, state: StreamState) {
-  // Only schedule if not already scheduled - prevents timer reset on every token
-  if (state.flushTimer) return;
+  } catch (e) {}
   
-  state.flushTimer = setTimeout(() => {
-    state.flushTimer = null;
-    updateDiscordMessage(state).catch(() => {});
-  }, EDIT_COALESCE_MS);
+  state.pendingEdit = false;
 }
 
 async function flushFinal(state: StreamState) {
-  if (state.flushTimer) {
-    clearTimeout(state.flushTimer);
-    state.flushTimer = null;
-  }
+  const fullText = state.buffer.trim();
+  if (!fullText) return;
   
-  state.isComplete = true;
-  
-  // Final update with all remaining content
-  if (state.buffer.trim()) {
-    const fullText = state.buffer.trim();
-    
-    try {
-      if (!state.message) {
-        // No message created yet - send it all
-        const chunks = splitMessage(fullText, DISCORD_LIMIT);
-        for (let i = 0; i < chunks.length; i++) {
-          if (i === 0) {
-            state.message = await state.replyTo.reply(chunks[i]);
-          } else {
-            await sendToChannel(state.channel, chunks[i]);
-          }
-        }
-      } else if (fullText.length <= DISCORD_LIMIT) {
-        // Fits in one message - final edit
-        await state.message.edit(fullText);
-      } else {
-        // Multiple messages needed - send remaining
-        const remaining = fullText.slice(state.displayedLength);
-        if (remaining) {
-          const chunks = splitMessage(remaining, DISCORD_LIMIT);
-          for (const chunk of chunks) {
-            await sendToChannel(state.channel, chunk);
-          }
+  try {
+    if (!state.message) {
+      // No message yet - send all
+      const chunks = splitMessage(fullText, DISCORD_LIMIT);
+      for (let i = 0; i < chunks.length; i++) {
+        if (i === 0) {
+          state.message = await state.replyTo.reply(chunks[i]);
+        } else {
+          await sendToChannel(state.channel, chunks[i]);
         }
       }
-    } catch (e) {}
-  }
+    } else if (fullText.length > state.lastEditLength) {
+      // Has new content since last edit
+      if (fullText.length <= DISCORD_LIMIT) {
+        await state.message.edit(fullText);
+      } else {
+        const newContent = fullText.slice(state.lastEditLength);
+        if (newContent) {
+          await sendToChannel(state.channel, newContent.slice(0, DISCORD_LIMIT));
+        }
+      }
+    }
+  } catch (e) {}
 }
 
 function splitMessage(text: string, maxLen: number): string[] {
@@ -161,7 +133,6 @@ function splitMessage(text: string, maxLen: number): string[] {
       break;
     }
     
-    // Find good breaking point
     let breakPoint = remaining.lastIndexOf("\n\n", maxLen);
     if (breakPoint < maxLen * 0.5) breakPoint = remaining.lastIndexOf("\n", maxLen);
     if (breakPoint < maxLen * 0.5) breakPoint = remaining.lastIndexOf(" ", maxLen);
@@ -178,48 +149,17 @@ async function handleStream(msg: StreamMessage, sessionKey: string) {
   if (msg.type !== "text" || !msg.content) return;
   
   const state = streams.get(sessionKey);
-  if (!state || state.isComplete) return;
-  
-  const text = msg.content;
-  
-  // Detect transition from thinking to response
-  if (state.mode === "thinking" && looksLikeResponseStart(text)) {
-    // Flush thinking before switching
-    await updateDiscordMessage(state);
-    state.mode = "response";
-  }
+  if (!state) return;
   
   // Append to buffer
-  state.buffer += text;
+  state.buffer += msg.content;
   
-  // Check if we should update Discord (every N chars or on natural breaks)
-  const newContentLength = state.buffer.length - state.displayedLength;
-  const hasNaturalBreak = text.includes("\n\n") || text.includes(". ") || text.includes("? ") || text.includes("! ");
-  
-  if (newContentLength >= EDIT_COALESCE_CHARS || (hasNaturalBreak && newContentLength > 100)) {
-    await updateDiscordMessage(state);
-  } else {
-    scheduleUpdate(sessionKey, state);
+  // Only edit if we have EDIT_BATCH_SIZE new chars and no pending edit
+  const newChars = state.buffer.length - state.lastEditLength;
+  if (newChars >= EDIT_BATCH_SIZE && !state.pendingEdit) {
+    // Fire and forget - don't await, don't block streaming
+    updateDiscordMessage(state).catch(() => {});
   }
-}
-
-function looksLikeResponseStart(text: string): boolean {
-  const trimmed = text.trim();
-  
-  if (trimmed.startsWith("#")) return true;
-  if (trimmed.startsWith("---")) return true;
-  if (trimmed.startsWith("```")) return true;
-  if (trimmed.startsWith(">")) return true;
-  if (trimmed.startsWith("|")) return true;
-  if (/^\d+\./.test(trimmed)) return true;
-  if (/^[A-Z][a-z]+ \d+:/.test(trimmed)) return true;
-  if (trimmed.startsWith("**")) return true;
-  
-  if (text.length > 100 && (text.includes("```") || text.includes("**") || text.includes("|"))) {
-    return true;
-  }
-  
-  return false;
 }
 
 async function sendToChannel(channel: Message["channel"], text: string): Promise<Message | undefined> {
@@ -265,8 +205,6 @@ async function handleMessage(message: Message) {
   const sessionKey = `discord-${message.channel.id}`;
   
   // Clean up any existing stream
-  const existing = streams.get(sessionKey);
-  if (existing?.flushTimer) clearTimeout(existing.flushTimer);
   streams.delete(sessionKey);
   
   // Create new stream state
@@ -275,10 +213,8 @@ async function handleMessage(message: Message) {
     replyTo: message,
     message: null,
     buffer: "",
-    displayedLength: 0,
-    mode: "thinking",
-    flushTimer: null,
-    isComplete: false,
+    lastEditLength: 0,
+    pendingEdit: false,
   };
   streams.set(sessionKey, state);
   
@@ -290,7 +226,7 @@ async function handleMessage(message: Message) {
         from: authorDisplayName,
         channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name },
         onStream: (msg: StreamMessage) => {
-          handleStream(msg, sessionKey).catch(() => {});
+          handleStream(msg, sessionKey);
         }
       }
     );
@@ -306,9 +242,6 @@ async function handleMessage(message: Message) {
     
   } catch (error: any) {
     ctx.log.error("Discord inject error:", error);
-    
-    const state = streams.get(sessionKey);
-    if (state?.flushTimer) clearTimeout(state.flushTimer);
     streams.delete(sessionKey);
     
     try {
@@ -322,7 +255,7 @@ async function handleMessage(message: Message) {
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.2.3",
+  version: "2.2.5",
   description: "Discord bot integration for WOPR with streaming support",
 
   async init(context: WOPRPluginContext) {
