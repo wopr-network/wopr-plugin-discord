@@ -52,15 +52,6 @@ const configSchema = {
   ],
 };
 
-function generatePairingCode(): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  for (let i = 0; i < 8; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return code;
-}
-
 async function handleMessage(message: Message) {
   if (!client || !ctx) return;
   if (message.author.bot) return;
@@ -73,20 +64,45 @@ async function handleMessage(message: Message) {
 
   const resolvedContent = message.content;
   
+  // Add eyes reaction to show we're processing
+  try {
+    await message.react("👀");
+  } catch (e) {
+    ctx.log.warn("Failed to add eyes reaction:", e);
+  }
+  
   try {
     const response = await ctx.inject(`discord-${message.channel.id}`, resolvedContent);
+    
+    // Remove eyes and add checkmark when done
+    try {
+      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+      await message.react("✅");
+    } catch (e) {
+      ctx.log.warn("Failed to update reactions:", e);
+    }
+    
     if (response) {
       await message.reply(response.slice(0, 2000));
     }
   } catch (error: any) {
     ctx.log.error("Discord inject error:", error);
+    
+    // Remove eyes and add X on error
+    try {
+      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+      await message.react("❌");
+    } catch (e) {
+      ctx.log.warn("Failed to update reactions:", e);
+    }
+    
     await message.reply("Error processing your request.");
   }
 }
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.0.4",
+  version: "2.0.6",
   description: "Discord bot integration for WOPR",
 
   async init(context: WOPRPluginContext) {
@@ -125,6 +141,7 @@ const plugin: WOPRPlugin = {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMessageReactions,
       ],
     });
 
