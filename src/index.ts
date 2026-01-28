@@ -8,12 +8,12 @@ import path from "path";
 import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage } from "./types.js";
 
 const logger = winston.createLogger({
-  level: "info",
+  level: "debug",
   format: winston.format.combine(winston.format.timestamp(), winston.format.errors({ stack: true }), winston.format.json()),
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
     new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"), level: "error" }),
-    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log") }),
+    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"), level: "debug" }),
     new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), winston.format.simple()), level: "warn" }),
   ],
 });
@@ -54,7 +54,11 @@ class DiscordMessage {
   
   // Returns true if we should create a new message (hit limit)
   async flush(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message): Promise<boolean> {
-    if (this.isFinalized || !this.buffer.trim()) return false;
+    logger.debug({ msg: "DiscordMessage.flush called", bufferLength: this.buffer.length, isFinalized: this.isFinalized, hasDiscordMsg: !!this.discordMsg });
+    if (this.isFinalized || !this.buffer.trim()) {
+      logger.debug({ msg: "Flush early return", isFinalized: this.isFinalized, bufferEmpty: !this.buffer.trim() });
+      return false;
+    }
     
     const content = this.buffer.trim();
     
@@ -76,23 +80,33 @@ class DiscordMessage {
       return true; // Need new message
     }
     
-    // Normal edit
+    // Only create/edit message if we have enough content (EDIT_THRESHOLD)
+    // OR if we already have a message (continue updating it)
     const newContent = content.slice(this.lastEditLength);
-    if (newContent.length >= EDIT_THRESHOLD || !this.discordMsg) {
-      if (this.discordMsg) {
+    if (this.discordMsg) {
+      // Already have message, edit it if enough new content
+      if (newContent.length >= EDIT_THRESHOLD) {
         await this.discordMsg.edit(content);
-      } else {
+        this.lastEditLength = content.length;
+      }
+    } else {
+      // No message yet - wait for EDIT_THRESHOLD before creating
+      if (content.length >= EDIT_THRESHOLD) {
         this.discordMsg = this.isReply 
           ? await replyTo.reply(content)
           : await channel.send(content);
+        this.lastEditLength = content.length;
       }
-      this.lastEditLength = content.length;
     }
     return false;
   }
   
   async finalize(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message): Promise<void> {
-    if (this.isFinalized || !this.buffer.trim()) return;
+    logger.debug({ msg: "DiscordMessage.finalize called", bufferLength: this.buffer.length, isFinalized: this.isFinalized, hasDiscordMsg: !!this.discordMsg, isReply: this.isReply });
+    if (this.isFinalized || !this.buffer.trim()) {
+      logger.debug({ msg: "Finalize early return", isFinalized: this.isFinalized, bufferEmpty: !this.buffer.trim() });
+      return;
+    }
     const content = this.buffer.trim();
     if (this.discordMsg) {
       await this.discordMsg.edit(content);
@@ -126,21 +140,30 @@ async function processPending(state: StreamState, sessionKey: string) {
 }
 
 async function processChunk(msg: StreamMessage, state: StreamState, sessionKey: string) {
+  logger.debug({ msg: "processChunk START", sessionKey, msgType: msg.type, msgKeys: Object.keys(msg) });
+  
   // Extract text content from various provider formats
   let textContent = "";
   if (msg.type === "text" && msg.content) {
     textContent = msg.content;
-  } else if (msg.type === "assistant" && msg.message?.content) {
+    logger.debug({ msg: "Extracted text content (flat)", textContent: textContent?.substring(0, 50) });
+  } else if (msg.type === "assistant" && (msg as any).message?.content) {
     // Handle nested content array from providers like Kimi
-    const content = msg.message.content;
+    const content = (msg as any).message.content;
+    logger.debug({ msg: "Processing assistant message", contentType: typeof content, isArray: Array.isArray(content) });
     if (Array.isArray(content)) {
       textContent = content.map((c: any) => c.text || "").join("");
+      logger.debug({ msg: "Extracted from array", textContent: textContent?.substring(0, 50), parts: content.length });
     } else if (typeof content === "string") {
       textContent = content;
+      logger.debug({ msg: "Extracted string content", textContent: textContent?.substring(0, 50) });
     }
   }
   
-  if (!textContent) return;
+  if (!textContent) {
+    logger.debug({ msg: "No text content extracted, skipping", msgType: msg.type });
+    return;
+  }
   
   const now = Date.now();
   const timeSinceLast = now - state.lastTokenTime;
@@ -172,15 +195,21 @@ async function processChunk(msg: StreamMessage, state: StreamState, sessionKey: 
 }
 
 async function handleChunk(msg: StreamMessage, sessionKey: string) {
+  logger.debug({ msg: "handleChunk called", sessionKey, hasState: !!streams.get(sessionKey), msgType: msg.type });
   const state = streams.get(sessionKey);
-  if (!state) return;
+  if (!state) {
+    logger.warn({ msg: "No state found for session", sessionKey });
+    return;
+  }
   
   // Queue the chunk
   state.pending.push({ msg, sessionKey });
+  logger.debug({ msg: "Chunk queued", sessionKey, queueSize: state.pending.length, processing: state.processing });
   
   // If not already processing, start
   if (!state.processing) {
     state.processing = true;
+    logger.debug({ msg: "Starting processPending", sessionKey });
     processPending(state, sessionKey).catch(e => {
       logger.error({ msg: "Chunk processing error", error: String(e) });
       state.processing = false;
