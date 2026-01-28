@@ -151,8 +151,19 @@ async function handleStream(msg: StreamMessage, sessionKey: string) {
   const state = streams.get(sessionKey);
   if (!state) return;
   
-  // Append to buffer
-  state.buffer += msg.content;
+  // Append to buffer with spacing logic
+  const text = msg.content;
+  const needsSpace = state.buffer.length > 0 && 
+    !state.buffer.endsWith(" ") && 
+    !state.buffer.endsWith("\n") &&
+    !text.startsWith(" ") &&
+    !text.startsWith("\n") &&
+    !text.startsWith(",") &&
+    !text.startsWith(".") &&
+    !text.startsWith("!") &&
+    !text.startsWith("?");
+  
+  state.buffer += (needsSpace ? " " : "") + text;
   
   // Only edit if we have EDIT_BATCH_SIZE new chars and no pending edit
   const newChars = state.buffer.length - state.lastEditLength;
