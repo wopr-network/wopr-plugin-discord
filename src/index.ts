@@ -50,8 +50,18 @@ async function handleMessage(message: Message) {
 
   const isMentioned = message.mentions.has(client.user.id);
   const isDM = message.channel.type === 1;
-
-  if (!isMentioned && !isDM) return;
+  
+  // Ignore @everyone and @here mentions (the bot is included but not directly mentioned)
+  const isDirectlyMentioned = message.mentions.users.has(client.user.id);
+  const isRoleMentioned = message.mentions.roles.size > 0;
+  const hasEveryoneMention = message.content.includes("@everyone");
+  const hasHereMention = message.content.includes("@here");
+  
+  // Only respond to direct mentions or DMs, not @everyone/@here
+  const shouldRespond = isDirectlyMentioned || isDM;
+  
+  // Additional check: if it's just @everyone/@here without a direct mention, ignore
+  if (!shouldRespond) return;
 
   const resolvedContent = message.content;
   
@@ -93,7 +103,7 @@ async function handleMessage(message: Message) {
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.0.6",
+  version: "2.0.7",
   description: "Discord bot integration for WOPR",
 
   async init(context: WOPRPluginContext) {
