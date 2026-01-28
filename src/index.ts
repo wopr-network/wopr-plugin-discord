@@ -178,7 +178,21 @@ async function handleStream(msg: StreamMessage, sessionKey: string) {
   state.currentBuffer += (needsSpace ? " " : "") + text;
   logger.debug({ msg: "Added to buffer", sessionKey, addedLength: text.length, bufferLength: state.currentBuffer.length, needsSpace });
   
-  resetIdleTimer(sessionKey, state);
+  // Flush if buffer is getting large (every ~1000 chars or near Discord limit)
+  if (state.currentBuffer.length >= 1000) {
+    logger.info({ msg: "Buffer reached threshold, flushing early", sessionKey, bufferLength: state.currentBuffer.length });
+    // Clear timer since we're flushing now
+    if (state.idleTimer) {
+      clearTimeout(state.idleTimer);
+      state.idleTimer = null;
+    }
+    // Fire and forget - don't block streaming
+    flushCurrentMessage(state, false).catch((err) => {
+      logger.error({ msg: "Early flush failed", sessionKey, error: String(err) });
+    });
+  } else {
+    resetIdleTimer(sessionKey, state);
+  }
 }
 
 async function handleMessage(message: Message) {
