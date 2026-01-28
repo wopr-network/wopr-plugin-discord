@@ -51,30 +51,28 @@ async function handleMessage(message: Message) {
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
   
-  // Determine if we should respond (only to direct mentions or DMs)
+  // Only respond to direct @mentions or DMs (not @everyone/@here)
   const shouldRespond = isDirectlyMentioned || isDM;
   
+  if (!shouldRespond) return;
+
   // Get author info for context tracking
   const authorName = message.author.username;
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || authorName;
   
-  // Clean up message content by removing bot mention if present
+  // Clean up message content by removing bot mention
   let messageContent = message.content;
-  if (client.user && isDirectlyMentioned) {
+  if (client.user) {
     const botMention = `<@${client.user.id}>`;
     const botNicknameMention = `<@!${client.user.id}>`;
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  // Always inject the message to maintain conversation context
-  // (even if not responding, so the bot sees the full conversation)
-  if (shouldRespond) {
-    // Add eyes reaction to show we're processing
-    try {
-      await message.react("👀");
-    } catch (e) {
-      ctx.log.warn("Failed to add eyes reaction:", e);
-    }
+  // Add eyes reaction to show we're processing
+  try {
+    await message.react("👀");
+  } catch (e) {
+    ctx.log.warn("Failed to add eyes reaction:", e);
   }
   
   try {
@@ -88,33 +86,29 @@ async function handleMessage(message: Message) {
       }
     );
     
-    if (shouldRespond) {
-      // Remove eyes and add checkmark when done
-      try {
-        await message.reactions.cache.get("👀")?.users.remove(client.user.id);
-        await message.react("✅");
-      } catch (e) {
-        ctx.log.warn("Failed to update reactions:", e);
-      }
-      
-      if (response) {
-        await message.reply(response.slice(0, 2000));
-      }
+    // Remove eyes and add checkmark when done
+    try {
+      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+      await message.react("✅");
+    } catch (e) {
+      ctx.log.warn("Failed to update reactions:", e);
+    }
+    
+    if (response) {
+      await message.reply(response.slice(0, 2000));
     }
   } catch (error: any) {
     ctx.log.error("Discord inject error:", error);
     
-    if (shouldRespond) {
-      // Remove eyes and add X on error
-      try {
-        await message.reactions.cache.get("👀")?.users.remove(client.user.id);
-        await message.react("❌");
-      } catch (e) {
-        ctx.log.warn("Failed to update reactions:", e);
-      }
-      
-      await message.reply("Error processing your request.");
+    // Remove eyes and add X on error
+    try {
+      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+      await message.react("❌");
+    } catch (e) {
+      ctx.log.warn("Failed to update reactions:", e);
     }
+    
+    await message.reply("Error processing your request.");
   }
 }
 
