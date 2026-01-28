@@ -48,39 +48,37 @@ async function handleMessage(message: Message) {
   if (message.author.bot) return;
   if (!client.user) return;
 
-  const isMentioned = message.mentions.has(client.user.id);
+  const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
   
-  // Ignore @everyone and @here mentions (the bot is included but not directly mentioned)
-  const isDirectlyMentioned = message.mentions.users.has(client.user.id);
-  
-  // Only respond to direct mentions or DMs, not @everyone/@here
+  // Determine if we should respond (only to direct mentions or DMs)
   const shouldRespond = isDirectlyMentioned || isDM;
   
-  // Additional check: if it's just @everyone/@here without a direct mention, ignore
-  if (!shouldRespond) return;
-
   // Get author info for context tracking
   const authorName = message.author.username;
-  const authorDisplayName = message.member?.displayName || message.author.displayName || authorName;
+  const authorDisplayName = message.member?.displayName || (message.author as any).displayName || authorName;
   
-  // Clean up message content by removing bot mention
+  // Clean up message content by removing bot mention if present
   let messageContent = message.content;
-  if (client.user) {
+  if (client.user && isDirectlyMentioned) {
     const botMention = `<@${client.user.id}>`;
     const botNicknameMention = `<@!${client.user.id}>`;
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  // Add eyes reaction to show we're processing
-  try {
-    await message.react("👀");
-  } catch (e) {
-    ctx.log.warn("Failed to add eyes reaction:", e);
+  // Always inject the message to maintain conversation context
+  // (even if not responding, so the bot sees the full conversation)
+  if (shouldRespond) {
+    // Add eyes reaction to show we're processing
+    try {
+      await message.react("👀");
+    } catch (e) {
+      ctx.log.warn("Failed to add eyes reaction:", e);
+    }
   }
   
   try {
-    // Pass author info so context/conversation history works properly
+    // Inject with author info for proper context tracking
     const response = await ctx.inject(
       `discord-${message.channel.id}`,
       messageContent,
@@ -90,35 +88,39 @@ async function handleMessage(message: Message) {
       }
     );
     
-    // Remove eyes and add checkmark when done
-    try {
-      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
-      await message.react("✅");
-    } catch (e) {
-      ctx.log.warn("Failed to update reactions:", e);
-    }
-    
-    if (response) {
-      await message.reply(response.slice(0, 2000));
+    if (shouldRespond) {
+      // Remove eyes and add checkmark when done
+      try {
+        await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+        await message.react("✅");
+      } catch (e) {
+        ctx.log.warn("Failed to update reactions:", e);
+      }
+      
+      if (response) {
+        await message.reply(response.slice(0, 2000));
+      }
     }
   } catch (error: any) {
     ctx.log.error("Discord inject error:", error);
     
-    // Remove eyes and add X on error
-    try {
-      await message.reactions.cache.get("👀")?.users.remove(client.user.id);
-      await message.react("❌");
-    } catch (e) {
-      ctx.log.warn("Failed to update reactions:", e);
+    if (shouldRespond) {
+      // Remove eyes and add X on error
+      try {
+        await message.reactions.cache.get("👀")?.users.remove(client.user.id);
+        await message.react("❌");
+      } catch (e) {
+        ctx.log.warn("Failed to update reactions:", e);
+      }
+      
+      await message.reply("Error processing your request.");
     }
-    
-    await message.reply("Error processing your request.");
   }
 }
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.0.8",
+  version: "2.0.9",
   description: "Discord bot integration for WOPR",
 
   async init(context: WOPRPluginContext) {
