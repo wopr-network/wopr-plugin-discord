@@ -1,6 +1,6 @@
 {
   "name": "wopr-plugin-discord",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "description": "Discord bot integration for WOPR - Enables AI conversations in Discord channels",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,6 @@
   "keywords": ["wopr", "plugin", "discord", "bot", "ai"],
   "author": "WOPR",
   "license": "MIT",
-  "peerDependencies": { "wopr": "^1.0.0" },
   "dependencies": { "discord.js": "^14.14.1" },
   "devDependencies": {
     "typescript": "^5.3.0",
