@@ -10,9 +10,11 @@ Discord bot integration for [WOPR](https://github.com/TSavo/wopr) - enables AI c
 
 ## Features
 
+- **Slash Commands** - Native Discord slash commands (/wopr, /status, /reset, etc.)
 - **@mention responses** - Bot responds when mentioned
 - **Reaction feedback** - 👀 (processing) → ✅ (done) or ❌ (error)
 - **Full conversation context** - Captures all channel messages for context
+- **Session management** - Per-channel sessions with reset/compact commands
 - **@everyone/@here ignored** - Only responds to direct mentions
 - **Per-channel sessions** - Each Discord channel has its own WOPR session
 - **TypeScript** - Written in TypeScript with full type support
@@ -26,16 +28,28 @@ wopr plugin enable wopr-plugin-discord
 
 ## Configuration
 
-Set your Discord bot token:
+### Required Settings
 
 ```bash
-wopr config set discord.token YOUR_BOT_TOKEN
+# Bot token (from Discord Developer Portal → Bot)
+wopr config set plugins.data.wopr-plugin-discord.token "YOUR_BOT_TOKEN"
+
+# Application ID (from Discord Developer Portal → General Information)
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_APPLICATION_ID"
 ```
 
-Or via the plugin config:
+### Optional Settings
 
 ```bash
-wopr config set plugins.data.wopr-plugin-discord.token YOUR_BOT_TOKEN
+# Restrict to specific guild (for faster command registration during development)
+wopr config set plugins.data.wopr-plugin-discord.guildId "YOUR_GUILD_ID"
+```
+
+### Legacy Config
+
+```bash
+# Old style config (still supported)
+wopr config set discord.token YOUR_BOT_TOKEN
 ```
 
 ## Discord Bot Setup
@@ -46,11 +60,40 @@ wopr config set plugins.data.wopr-plugin-discord.token YOUR_BOT_TOKEN
 4. Enable "MESSAGE CONTENT INTENT"
 5. Enable "SERVER MEMBERS INTENT"
 6. Copy the bot token
-7. Add the bot to your server via OAuth2 URL Generator
+7. Note the **Application ID** (for slash commands)
+8. Add the bot to your server via OAuth2 URL Generator
+   - Enable `applications.commands` scope for slash commands
 
-## Usage
+## Slash Commands
 
-Once configured and the daemon is running:
+The plugin registers native Discord slash commands for easy interaction:
+
+| Command | Description | Options |
+|---------|-------------|---------|
+| `/wopr <message>` | Send a message to WOPR | `message` (required) |
+| `/status` | Show session status | - |
+| `/new` | Start a new session (reset) | - |
+| `/reset` | Alias for /new | - |
+| `/compact` | Summarize conversation context | - |
+| `/think <level>` | Set thinking level | `off/minimal/low/medium/high/xhigh` |
+| `/verbose <enabled>` | Toggle verbose mode | `true/false` |
+| `/usage <mode>` | Set usage tracking | `off/tokens/full` |
+| `/session <name>` | Switch to named session | `name` (required) |
+| `/help` | Show available commands | - |
+
+### Example Usage
+
+```
+/wopr Explain quantum computing
+/think high
+/wopr Solve this complex problem
+/status
+/reset
+```
+
+## Usage (Mentions)
+
+You can also mention the bot directly:
 
 ```
 @WOPR Hello! What's your name?

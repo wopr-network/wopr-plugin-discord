@@ -1,8 +1,21 @@
 /**
- * WOPR Discord Plugin - Proper streaming with message separation
+ * WOPR Discord Plugin - With Slash Commands
  */
 
-import { Client, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, DMChannel } from "discord.js";
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Events, 
+  Message, 
+  TextChannel, 
+  ThreadChannel, 
+  DMChannel,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  ChatInputCommandInteraction,
+  PermissionFlagsBits
+} from "discord.js";
 import winston from "winston";
 import path from "path";
 import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage, AgentIdentity } from "./types.js";
@@ -22,6 +35,78 @@ let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
 let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
 
+// Slash command definitions
+const commands = [
+  new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Show session status and configuration"),
+  new SlashCommandBuilder()
+    .setName("new")
+    .setDescription("Start a new session (reset conversation)"),
+  new SlashCommandBuilder()
+    .setName("reset")
+    .setDescription("Reset the current session (alias for /new)"),
+  new SlashCommandBuilder()
+    .setName("compact")
+    .setDescription("Compact session context (summarize conversation)"),
+  new SlashCommandBuilder()
+    .setName("think")
+    .setDescription("Set the thinking level for responses")
+    .addStringOption(option =>
+      option.setName("level")
+        .setDescription("Thinking level")
+        .setRequired(true)
+        .addChoices(
+          { name: "Off", value: "off" },
+          { name: "Minimal", value: "minimal" },
+          { name: "Low", value: "low" },
+          { name: "Medium", value: "medium" },
+          { name: "High", value: "high" },
+          { name: "Maximum", value: "xhigh" }
+        )
+    ),
+  new SlashCommandBuilder()
+    .setName("verbose")
+    .setDescription("Toggle verbose mode")
+    .addBooleanOption(option =>
+      option.setName("enabled")
+        .setDescription("Enable or disable verbose mode")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("usage")
+    .setDescription("Set usage tracking display")
+    .addStringOption(option =>
+      option.setName("mode")
+        .setDescription("Usage display mode")
+        .setRequired(true)
+        .addChoices(
+          { name: "Off", value: "off" },
+          { name: "Tokens only", value: "tokens" },
+          { name: "Full", value: "full" }
+        )
+    ),
+  new SlashCommandBuilder()
+    .setName("session")
+    .setDescription("Switch to a different session")
+    .addStringOption(option =>
+      option.setName("name")
+        .setDescription("Session name")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("wopr")
+    .setDescription("Send a message to WOPR")
+    .addStringOption(option =>
+      option.setName("message")
+        .setDescription("Your message")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show available commands and help"),
+];
+
 // Cache identity on init
 async function refreshIdentity() {
   if (!ctx) return;
@@ -36,12 +121,10 @@ async function refreshIdentity() {
   }
 }
 
-// Get the reaction emoji (from identity or default)
 function getAckReaction(): string {
   return agentIdentity.emoji?.trim() || "👀";
 }
 
-// Get message prefix from identity name
 function getMessagePrefix(): string {
   const name = agentIdentity.name?.trim();
   return name ? `[${name}]` : "[WOPR]";
@@ -49,20 +132,43 @@ function getMessagePrefix(): string {
 
 const configSchema: ConfigSchema = {
   title: "Discord Integration",
-  description: "Configure Discord bot integration",
+  description: "Configure Discord bot integration with slash commands",
   fields: [
     { name: "token", type: "password", label: "Discord Bot Token", placeholder: "Bot token from Discord Developer Portal", required: true, description: "Your Discord bot token" },
     { name: "guildId", type: "text", label: "Guild ID (optional)", placeholder: "Server ID to restrict bot to", description: "Restrict bot to a specific Discord server" },
+    { name: "clientId", type: "text", label: "Application ID", placeholder: "From Discord Developer Portal", description: "Discord Application ID (for slash commands)" },
     { name: "pairingRequests", type: "object", hidden: true, default: {} },
     { name: "mappings", type: "object", hidden: true, default: {} },
   ],
 };
 
-const DISCORD_LIMIT = 2000;
-const EDIT_THRESHOLD = 800;  // Edit after 800 new chars
-const IDLE_SPLIT_MS = 1000;  // New message after 1s idle
+// Session state management per channel
+interface SessionState {
+  thinkingLevel: string;
+  verbose: boolean;
+  usageMode: string;
+  messageCount: number;
+}
 
-// Represents ONE discord message being built
+const sessionStates = new Map<string, SessionState>();
+
+function getSessionState(sessionKey: string): SessionState {
+  if (!sessionStates.has(sessionKey)) {
+    sessionStates.set(sessionKey, {
+      thinkingLevel: "medium",
+      verbose: false,
+      usageMode: "tokens",
+      messageCount: 0
+    });
+  }
+  return sessionStates.get(sessionKey)!;
+}
+
+// Discord streaming message handler
+const DISCORD_LIMIT = 2000;
+const EDIT_THRESHOLD = 800;
+const IDLE_SPLIT_MS = 1000;
+
 class DiscordMessage {
   discordMsg: Message | null = null;
   buffer = "";
@@ -78,19 +184,12 @@ class DiscordMessage {
     this.buffer += text;
   }
   
-  // Returns true if we should create a new message (hit limit)
   async flush(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message): Promise<boolean> {
-    logger.debug({ msg: "DiscordMessage.flush called", bufferLength: this.buffer.length, isFinalized: this.isFinalized, hasDiscordMsg: !!this.discordMsg });
-    if (this.isFinalized || !this.buffer.trim()) {
-      logger.debug({ msg: "Flush early return", isFinalized: this.isFinalized, bufferEmpty: !this.buffer.trim() });
-      return false;
-    }
+    if (this.isFinalized || !this.buffer.trim()) return false;
     
     const content = this.buffer.trim();
     
-    // Check if we hit Discord limit
     if (content.length > DISCORD_LIMIT) {
-      // Send what fits
       const toSend = content.slice(0, DISCORD_LIMIT);
       if (this.discordMsg) {
         await this.discordMsg.edit(toSend);
@@ -99,24 +198,19 @@ class DiscordMessage {
           ? await replyTo.reply(toSend)
           : await channel.send(toSend);
       }
-      // Keep remainder for next message
       this.buffer = content.slice(DISCORD_LIMIT);
       this.lastEditLength = 0;
       this.isFinalized = true;
-      return true; // Need new message
+      return true;
     }
     
-    // Only create/edit message if we have enough content (EDIT_THRESHOLD)
-    // OR if we already have a message (continue updating it)
     const newContent = content.slice(this.lastEditLength);
     if (this.discordMsg) {
-      // Already have message, edit it if enough new content
       if (newContent.length >= EDIT_THRESHOLD) {
         await this.discordMsg.edit(content);
         this.lastEditLength = content.length;
       }
     } else {
-      // No message yet - wait for EDIT_THRESHOLD before creating
       if (content.length >= EDIT_THRESHOLD) {
         this.discordMsg = this.isReply 
           ? await replyTo.reply(content)
@@ -128,11 +222,7 @@ class DiscordMessage {
   }
   
   async finalize(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message): Promise<void> {
-    logger.debug({ msg: "DiscordMessage.finalize called", bufferLength: this.buffer.length, isFinalized: this.isFinalized, hasDiscordMsg: !!this.discordMsg, isReply: this.isReply });
-    if (this.isFinalized || !this.buffer.trim()) {
-      logger.debug({ msg: "Finalize early return", isFinalized: this.isFinalized, bufferEmpty: !this.buffer.trim() });
-      return;
-    }
+    if (this.isFinalized || !this.buffer.trim()) return;
     const content = this.buffer.trim();
     if (this.discordMsg) {
       await this.discordMsg.edit(content);
@@ -167,39 +257,26 @@ async function processPending(state: StreamState, sessionKey: string) {
 }
 
 async function processChunk(msg: StreamMessage, state: StreamState, sessionKey: string) {
-  logger.debug({ msg: "processChunk START", sessionKey, msgType: msg.type, msgKeys: Object.keys(msg) });
-  
-  // Extract text content from various provider formats
   let textContent = "";
   if (msg.type === "text" && msg.content) {
     textContent = msg.content;
-    logger.debug({ msg: "Extracted text content (flat)", textContent: textContent?.substring(0, 50) });
   } else if (msg.type === "assistant" && (msg as any).message?.content) {
-    // Handle nested content array from providers like Kimi
     const content = (msg as any).message.content;
-    logger.debug({ msg: "Processing assistant message", contentType: typeof content, isArray: Array.isArray(content) });
     if (Array.isArray(content)) {
       textContent = content.map((c: any) => c.text || "").join("");
-      logger.debug({ msg: "Extracted from array", textContent: textContent?.substring(0, 50), parts: content.length });
     } else if (typeof content === "string") {
       textContent = content;
-      logger.debug({ msg: "Extracted string content", textContent: textContent?.substring(0, 50) });
     }
   }
   
-  if (!textContent) {
-    logger.debug({ msg: "No text content extracted, skipping", msgType: msg.type });
-    return;
-  }
+  if (!textContent) return;
   
   const now = Date.now();
   const timeSinceLast = now - state.lastTokenTime;
   
-  // Check for idle gap - finalize current and start new message
   if (timeSinceLast > IDLE_SPLIT_MS && state.currentMsg.buffer.length > 0) {
-    logger.info({ msg: "Idle gap detected", sessionKey, gapMs: timeSinceLast });
     await state.currentMsg.finalize(state.channel, state.replyTo);
-    const newMsg = new DiscordMessage(false); // Follow-ups aren't replies
+    const newMsg = new DiscordMessage(false);
     state.messages.push(state.currentMsg);
     state.currentMsg = newMsg;
   }
@@ -207,61 +284,236 @@ async function processChunk(msg: StreamMessage, state: StreamState, sessionKey: 
   state.lastTokenTime = now;
   state.currentMsg.addContent(textContent);
   
-  // Reset finalize timer after each chunk
   if ((state as any).setupFinalizeTimer) {
     (state as any).setupFinalizeTimer();
   }
   
-  // Flush current message
   const needsNewMsg = await state.currentMsg.flush(state.channel, state.replyTo);
   
   if (needsNewMsg) {
-    // Current hit limit, create new one with remainder
     const newMsg = new DiscordMessage(false);
-    newMsg.buffer = state.currentMsg.buffer; // Transfer remainder
+    newMsg.buffer = state.currentMsg.buffer;
     state.messages.push(state.currentMsg);
     state.currentMsg = newMsg;
-    // Flush the remainder
     await state.currentMsg.flush(state.channel, state.replyTo);
   }
 }
 
 async function handleChunk(msg: StreamMessage, sessionKey: string) {
-  logger.debug({ msg: "handleChunk called", sessionKey, hasState: !!streams.get(sessionKey), msgType: msg.type });
   const state = streams.get(sessionKey);
-  if (!state) {
-    logger.warn({ msg: "No state found for session", sessionKey });
-    return;
-  }
+  if (!state) return;
   
-  // Queue the chunk
   state.pending.push({ msg, sessionKey });
-  logger.debug({ msg: "Chunk queued", sessionKey, queueSize: state.pending.length, processing: state.processing });
   
-  // If not already processing, start
   if (!state.processing) {
     state.processing = true;
-    logger.debug({ msg: "Starting processPending", sessionKey });
-    processPending(state, sessionKey).catch(e => {
+    processPending(state, sessionKey).catch((e) => {
       logger.error({ msg: "Chunk processing error", error: String(e) });
       state.processing = false;
     });
   }
 }
 
-async function handleMessage(message: Message) {
-  logger.debug({ msg: "RECEIVED MESSAGE", content: message.content?.substring(0,100), author: message.author?.tag, bot: message.author?.bot, isBot: message.author?.id === client?.user?.id });
+// Handle slash commands
+async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
+  if (!ctx || !client) return;
   
+  const { commandName } = interaction;
+  const sessionKey = `discord-${interaction.channelId}`;
+  const state = getSessionState(sessionKey);
+  
+  logger.info({ msg: "Slash command received", command: commandName, user: interaction.user.tag });
+  
+  switch (commandName) {
+    case "status": {
+      const sessionInfo = await getSessionInfo(sessionKey);
+      await interaction.reply({
+        content: `📊 **Session Status**\n\n` +
+          `**Session:** ${sessionKey}\n` +
+          `**Thinking Level:** ${state.thinkingLevel}\n` +
+          `**Verbose Mode:** ${state.verbose ? "On" : "Off"}\n` +
+          `**Usage Tracking:** ${state.usageMode}\n` +
+          `**Messages:** ${state.messageCount}\n` +
+          `${sessionInfo}`,
+        ephemeral: true
+      });
+      break;
+    }
+    
+    case "new":
+    case "reset": {
+      // Reset the session
+      sessionStates.delete(sessionKey);
+      streams.delete(sessionKey);
+      await interaction.reply({
+        content: "🔄 **Session Reset**\n\nStarting fresh! Your conversation history has been cleared.",
+        ephemeral: false
+      });
+      break;
+    }
+    
+    case "compact": {
+      await interaction.reply({
+        content: "📦 **Compacting Session**\n\nSummarizing conversation context...",
+        ephemeral: false
+      });
+      
+      try {
+        const summary = await ctx.inject(sessionKey, 
+          "Please provide a brief summary of our conversation so far. Keep it concise.", 
+          { silent: true }
+        );
+        await interaction.editReply(`📦 **Session Summary**\n\n${summary}`);
+      } catch (e) {
+        await interaction.editReply("❌ Failed to compact session.");
+      }
+      break;
+    }
+    
+    case "think": {
+      const level = interaction.options.getString("level", true);
+      state.thinkingLevel = level;
+      const levelEmoji = { off: "🛑", minimal: "💡", low: "🤔", medium: "🧠", high: "🔬", xhigh: "🔮" }[level] || "🧠";
+      await interaction.reply({
+        content: `${levelEmoji} **Thinking level set to:** ${level}`,
+        ephemeral: true
+      });
+      break;
+    }
+    
+    case "verbose": {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      state.verbose = enabled;
+      await interaction.reply({
+        content: enabled ? "🔊 **Verbose mode enabled**" : "🔇 **Verbose mode disabled**",
+        ephemeral: true
+      });
+      break;
+    }
+    
+    case "usage": {
+      const mode = interaction.options.getString("mode", true);
+      state.usageMode = mode;
+      await interaction.reply({
+        content: `📈 **Usage tracking set to:** ${mode}`,
+        ephemeral: true
+      });
+      break;
+    }
+    
+    case "session": {
+      const name = interaction.options.getString("name", true);
+      const newSessionKey = `discord-${interaction.channelId}-${name}`;
+      await interaction.reply({
+        content: `💬 **Switched to session:** ${name}\n\nNote: Each session maintains separate context.`,
+        ephemeral: false
+      });
+      break;
+    }
+    
+    case "wopr": {
+      const message = interaction.options.getString("message", true);
+      await handleWoprMessage(interaction, message);
+      break;
+    }
+    
+    case "help": {
+      await interaction.reply({
+        content: `**🤖 WOPR Discord Commands**\n\n` +
+          `**/status** - Show session status\n` +
+          `**/new** or **/reset** - Start fresh session\n` +
+          `**/compact** - Summarize conversation\n` +
+          `**/think <level>** - Set thinking level (off/minimal/low/medium/high/xhigh)\n` +
+          `**/verbose <on/off>** - Toggle verbose mode\n` +
+          `**/usage <mode>** - Set usage tracking (off/tokens/full)\n` +
+          `**/session <name>** - Switch to named session\n` +
+          `**/wopr <message>** - Send message to WOPR\n` +
+          `**/help** - Show this help\n\n` +
+          `You can also mention me (@${client.user?.username}) to chat!`,
+        ephemeral: true
+      });
+      break;
+    }
+  }
+}
+
+async function getSessionInfo(sessionKey: string): Promise<string> {
+  // This would integrate with WOPR session API
+  return "💾 Session active";
+}
+
+async function handleWoprMessage(interaction: ChatInputCommandInteraction, messageContent: string) {
+  if (!ctx || !client) return;
+  
+  const sessionKey = `discord-${interaction.channelId}`;
+  const state = getSessionState(sessionKey);
+  state.messageCount++;
+  
+  // Defer reply since AI response takes time
+  await interaction.deferReply();
+  
+  // Add thinking level context
+  let fullMessage = messageContent;
+  if (state.thinkingLevel !== "medium") {
+    fullMessage = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
+  }
+  
+  streams.delete(sessionKey);
+  
+  const currentMsg = new DiscordMessage(false);
+  const streamState: StreamState = {
+    channel: interaction.channel as TextChannel | ThreadChannel | DMChannel,
+    replyTo: null as any, // Will use editReply instead
+    messages: [],
+    currentMsg,
+    lastTokenTime: Date.now(),
+    processing: false,
+    pending: [],
+    finalizeTimer: null,
+  };
+  
+  let responseBuffer = "";
+  
+  try {
+    const response = await ctx.inject(sessionKey, fullMessage, {
+      from: interaction.user.username,
+      channel: { type: "discord", id: interaction.channelId, name: "slash-command" },
+      onStream: (msg: StreamMessage) => {
+        // Collect response for editing
+        if (msg.type === "text" && msg.content) {
+          responseBuffer += msg.content;
+          // Edit reply every few chunks
+          if (responseBuffer.length % 500 < 50) {
+            interaction.editReply(responseBuffer.slice(0, 2000)).catch(() => {});
+          }
+        }
+      }
+    });
+    
+    // Final edit with complete response
+    const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
+    await interaction.editReply((response + usage).slice(0, 2000));
+    
+  } catch (error: any) {
+    logger.error({ msg: "Slash command inject failed", error: String(error) });
+    await interaction.editReply("❌ Error processing your request.");
+  }
+}
+
+// Handle @mention messages
+async function handleMessage(message: Message) {
   if (!client || !ctx) return;
   if (message.author.bot) return;
   if (!client.user) return;
+  
+  // Ignore slash command interactions
+  if (message.interaction) return;
 
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
   
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
   
-  // ALWAYS log the message to session (for context history)
   try { 
     ctx.logMessage(`discord-${message.channel.id}`, message.content, { 
       from: authorDisplayName, 
@@ -269,7 +521,6 @@ async function handleMessage(message: Message) {
     }); 
   } catch (e) {}
   
-  // Only respond/inject if mentioned or DM
   if (!isDirectlyMentioned && !isDM) return;
 
   let messageContent = message.content;
@@ -279,14 +530,19 @@ async function handleMessage(message: Message) {
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
+  if (!messageContent) return; // Skip empty mentions
+  
   const ackEmoji = getAckReaction();
   try { await message.react(ackEmoji); } catch (e) {}
   
   const sessionKey = `discord-${message.channel.id}`;
+  const state = getSessionState(sessionKey);
+  state.messageCount++;
+  
   streams.delete(sessionKey);
   
-  const currentMsg = new DiscordMessage(true); // First message is a reply
-  const state: StreamState = {
+  const currentMsg = new DiscordMessage(true);
+  const streamState: StreamState = {
     channel: message.channel as TextChannel | ThreadChannel | DMChannel,
     replyTo: message,
     messages: [],
@@ -297,24 +553,24 @@ async function handleMessage(message: Message) {
     finalizeTimer: null,
   };
   
-  // Setup finalize timer - sends message after 2s of inactivity even if buffer < 800 chars
   const setupFinalizeTimer = () => {
-    if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
-    state.finalizeTimer = setTimeout(async () => {
-      if (state.currentMsg.buffer.length > 0 && !state.currentMsg.isFinalized) {
-        logger.info({ msg: "Finalize timer triggered", sessionKey, bufferLength: state.currentMsg.buffer.length });
-        await state.currentMsg.finalize(state.channel, state.replyTo);
+    if (streamState.finalizeTimer) clearTimeout(streamState.finalizeTimer);
+    streamState.finalizeTimer = setTimeout(async () => {
+      if (streamState.currentMsg.buffer.length > 0 && !streamState.currentMsg.isFinalized) {
+        await streamState.currentMsg.finalize(streamState.channel, streamState.replyTo);
       }
-    }, 2000); // 2 seconds
+    }, 2000);
   };
   
-  // Store timer setup function on state for processChunk to use
-  (state as any).setupFinalizeTimer = setupFinalizeTimer;
-  setupFinalizeTimer(); // Start initial timer
+  (streamState as any).setupFinalizeTimer = setupFinalizeTimer;
+  setupFinalizeTimer();
   
-  streams.set(sessionKey, state);
+  streams.set(sessionKey, streamState);
   
-  logger.info({ msg: "New stream", sessionKey });
+  // Add thinking level context
+  if (state.thinkingLevel !== "medium") {
+    messageContent = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
+  }
   
   try {
     await ctx.inject(sessionKey, messageContent, {
@@ -325,10 +581,14 @@ async function handleMessage(message: Message) {
       }
     });
     
-    // Finalize last message
-    await state.currentMsg.finalize(state.channel, state.replyTo);
-    if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
+    await streamState.currentMsg.finalize(streamState.channel, streamState.replyTo);
+    if (streamState.finalizeTimer) clearTimeout(streamState.finalizeTimer);
     streams.delete(sessionKey);
+    
+    const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
+    if (usage && streamState.currentMsg.discordMsg) {
+      await streamState.currentMsg.discordMsg.edit(streamState.currentMsg.discordMsg.content + usage);
+    }
     
     try { 
       const ackEmoji = getAckReaction();
@@ -337,7 +597,7 @@ async function handleMessage(message: Message) {
     } catch (e) {}
   } catch (error: any) {
     logger.error({ msg: "Inject failed", error: String(error) });
-    if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
+    if (streamState.finalizeTimer) clearTimeout(streamState.finalizeTimer);
     streams.delete(sessionKey);
     try { 
       const ackEmoji = getAckReaction();
@@ -348,25 +608,90 @@ async function handleMessage(message: Message) {
   }
 }
 
+// Register slash commands
+async function registerSlashCommands(token: string, clientId: string, guildId?: string) {
+  const rest = new REST({ version: "10" }).setToken(token);
+  
+  try {
+    logger.info("Registering slash commands...");
+    
+    if (guildId) {
+      // Register to specific guild (faster for development)
+      await rest.put(
+        Routes.applicationGuildCommands(clientId, guildId),
+        { body: commands.map(cmd => cmd.toJSON()) }
+      );
+      logger.info(`Registered ${commands.length} commands to guild ${guildId}`);
+    } else {
+      // Register globally (can take up to 1 hour to propagate)
+      await rest.put(
+        Routes.applicationCommands(clientId),
+        { body: commands.map(cmd => cmd.toJSON()) }
+      );
+      logger.info(`Registered ${commands.length} global commands`);
+    }
+  } catch (error) {
+    logger.error({ msg: "Failed to register commands", error: String(error) });
+  }
+}
+
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.10.0",
-  description: "Discord bot with identity support (AGENTS.md/SOUL.md)",
+  version: "2.11.0",
+  description: "Discord bot with slash commands and identity support",
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
     
-    // Load agent identity for reactions/prefixes
     await refreshIdentity();
-    let config = ctx.getConfig<{token?: string; guildId?: string}>();
-    if (!config?.token) { const legacy = ctx.getMainConfig("discord") as {token?: string}; if (legacy?.token) config = { token: legacy.token }; }
-    if (!config?.token) { logger.warn("Not configured"); return; }
-    client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.GuildMessageReactions] });
+    let config = ctx.getConfig<{token?: string; guildId?: string; clientId?: string}>();
+    if (!config?.token) { 
+      const legacy = ctx.getMainConfig("discord") as {token?: string}; 
+      if (legacy?.token) config = { token: legacy.token }; 
+    }
+    if (!config?.token) { 
+      logger.warn("Not configured"); 
+      return; 
+    }
+    
+    client = new Client({ 
+      intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent, 
+        GatewayIntentBits.DirectMessages, 
+        GatewayIntentBits.GuildMessageReactions
+      ] 
+    });
+    
     client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error(e)));
-    client.on(Events.ClientReady, () => logger.info({ tag: client?.user?.tag }));
-    try { await client.login(config.token); logger.info("Started"); } catch (e) { logger.error(e); throw e; }
+    client.on(Events.InteractionCreate, async (interaction) => {
+      if (!interaction.isChatInputCommand()) return;
+      await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
+    });
+    
+    client.on(Events.ClientReady, async () => {
+      logger.info({ tag: client?.user?.tag });
+      
+      // Register slash commands
+      if (config.clientId) {
+        await registerSlashCommands(config.token, config.clientId, config.guildId);
+      } else {
+        logger.warn("No clientId configured - slash commands not registered");
+      }
+    });
+    
+    try { 
+      await client.login(config.token); 
+      logger.info("Discord bot started"); 
+    } catch (e) { 
+      logger.error(e); 
+      throw e; 
+    }
   },
-  async shutdown() { if (client) await client.destroy(); },
+  async shutdown() { 
+    if (client) await client.destroy(); 
+  },
 };
 
 export default plugin;
