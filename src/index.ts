@@ -235,7 +235,7 @@ async function handleMessage(message: Message) {
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  try { ctx.logMessage(`discord-${message.channel.id}`, `${authorDisplayName}: ${message.content}`, { from: authorDisplayName, channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name } }); } catch (e) {}
+  try { ctx.logMessage(`discord-${message.channel.id}`, messageContent, { from: authorDisplayName, channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name } }); } catch (e) {}
   try { await message.react("👀"); } catch (e) {}
   
   const sessionKey = `discord-${message.channel.id}`;
