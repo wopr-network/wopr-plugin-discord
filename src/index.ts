@@ -230,10 +230,20 @@ async function handleMessage(message: Message) {
 
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
-  if (!isDirectlyMentioned && !isDM) return;
-
+  
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
   
+  // ALWAYS log the message to session (for context history)
+  try { 
+    ctx.logMessage(`discord-${message.channel.id}`, message.content, { 
+      from: authorDisplayName, 
+      channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name } 
+    }); 
+  } catch (e) {}
+  
+  // Only respond/inject if mentioned or DM
+  if (!isDirectlyMentioned && !isDM) return;
+
   let messageContent = message.content;
   if (client.user && isDirectlyMentioned) {
     const botMention = `<@${client.user.id}>`;
@@ -241,7 +251,6 @@ async function handleMessage(message: Message) {
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  try { ctx.logMessage(`discord-${message.channel.id}`, messageContent, { from: authorDisplayName, channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name } }); } catch (e) {}
   try { await message.react("👀"); } catch (e) {}
   
   const sessionKey = `discord-${message.channel.id}`;
