@@ -49,11 +49,28 @@ export interface PluginLogger {
   error: (...args: any[]) => void;
 }
 
+export interface AgentIdentity {
+  name?: string;
+  creature?: string;
+  vibe?: string;
+  emoji?: string;
+}
+
+export interface UserProfile {
+  name?: string;
+  preferredAddress?: string;
+  pronouns?: string;
+  timezone?: string;
+  notes?: string;
+}
+
 export interface WOPRPluginContext {
   inject: (session: string, message: string, options?: InjectOptions) => Promise<string>;
   logMessage: (session: string, message: string, options?: LogMessageOptions) => void;
   injectPeer: (peer: string, session: string, message: string) => Promise<string>;
   getIdentity: () => { publicKey: string; shortId: string; encryptPub: string };
+  getAgentIdentity: () => AgentIdentity | Promise<AgentIdentity>;
+  getUserProfile: () => UserProfile | Promise<UserProfile>;
   getSessions: () => string[];
   getPeers: () => any[];
   getConfig: <T = any>() => T;

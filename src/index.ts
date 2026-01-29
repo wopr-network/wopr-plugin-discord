@@ -5,7 +5,7 @@
 import { Client, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, DMChannel } from "discord.js";
 import winston from "winston";
 import path from "path";
-import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage } from "./types.js";
+import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage, AgentIdentity } from "./types.js";
 
 const logger = winston.createLogger({
   level: "debug",
@@ -20,6 +20,32 @@ const logger = winston.createLogger({
 
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
+let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
+
+// Cache identity on init
+async function refreshIdentity() {
+  if (!ctx) return;
+  try {
+    const identity = await ctx.getAgentIdentity();
+    if (identity) {
+      agentIdentity = { ...agentIdentity, ...identity };
+      logger.info({ msg: "Identity refreshed", identity: agentIdentity });
+    }
+  } catch (e) {
+    logger.warn({ msg: "Failed to refresh identity", error: String(e) });
+  }
+}
+
+// Get the reaction emoji (from identity or default)
+function getAckReaction(): string {
+  return agentIdentity.emoji?.trim() || "👀";
+}
+
+// Get message prefix from identity name
+function getMessagePrefix(): string {
+  const name = agentIdentity.name?.trim();
+  return name ? `[${name}]` : "[WOPR]";
+}
 
 const configSchema: ConfigSchema = {
   title: "Discord Integration",
@@ -253,7 +279,8 @@ async function handleMessage(message: Message) {
     messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
   }
   
-  try { await message.react("👀"); } catch (e) {}
+  const ackEmoji = getAckReaction();
+  try { await message.react(ackEmoji); } catch (e) {}
   
   const sessionKey = `discord-${message.channel.id}`;
   streams.delete(sessionKey);
@@ -303,23 +330,34 @@ async function handleMessage(message: Message) {
     if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
     streams.delete(sessionKey);
     
-    try { await message.reactions.cache.get("👀")?.users.remove(client.user.id); await message.react("✅"); } catch (e) {}
+    try { 
+      const ackEmoji = getAckReaction();
+      await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id); 
+      await message.react("✅"); 
+    } catch (e) {}
   } catch (error: any) {
     logger.error({ msg: "Inject failed", error: String(error) });
     if (state.finalizeTimer) clearTimeout(state.finalizeTimer);
     streams.delete(sessionKey);
-    try { await message.reactions.cache.get("👀")?.users.remove(client.user.id); await message.react("❌"); } catch (e) {}
+    try { 
+      const ackEmoji = getAckReaction();
+      await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id); 
+      await message.react("❌"); 
+    } catch (e) {}
     await message.reply("Error processing your request.");
   }
 }
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
-  version: "2.9.0",
-  description: "Discord bot with proper message separation",
+  version: "2.10.0",
+  description: "Discord bot with identity support (AGENTS.md/SOUL.md)",
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
+    
+    // Load agent identity for reactions/prefixes
+    await refreshIdentity();
     let config = ctx.getConfig<{token?: string; guildId?: string}>();
     if (!config?.token) { const legacy = ctx.getMainConfig("discord") as {token?: string}; if (legacy?.token) config = { token: legacy.token }; }
     if (!config?.token) { logger.warn("Not configured"); return; }
