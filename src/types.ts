@@ -20,7 +20,7 @@ export interface ConfigSchema {
 }
 
 export interface StreamMessage {
-  type: "text";
+  type: "text" | "assistant";
   content: string;
 }
 

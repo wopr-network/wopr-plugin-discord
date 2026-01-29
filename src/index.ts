@@ -224,6 +224,8 @@ async function handleChunk(msg: StreamMessage, sessionKey: string) {
 }
 
 async function handleMessage(message: Message) {
+  logger.debug({ msg: "RECEIVED MESSAGE", content: message.content?.substring(0,100), author: message.author?.tag, bot: message.author?.bot, isBot: message.author?.id === client?.user?.id });
+  
   if (!client || !ctx) return;
   if (message.author.bot) return;
   if (!client.user) return;
