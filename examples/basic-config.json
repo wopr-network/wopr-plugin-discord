@@ -1,0 +1,18 @@
+{
+  "//": "Basic Discord bot configuration",
+  "token": "YOUR_BOT_TOKEN_HERE",
+  
+  "// sessionMapping": "Map Discord channels to WOPR sessions",
+  "sessionMapping": {
+    "default": "general"
+  },
+  
+  "// dmPolicy": "How to handle DMs: pairing, allowlist, open, or disabled",
+  "dmPolicy": "open",
+  
+  "// enableReactions": "Show 👀/✅ reactions while processing",
+  "enableReactions": true,
+  
+  "// enableTyping": "Show typing indicator",
+  "enableTyping": true
+}

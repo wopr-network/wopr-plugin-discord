@@ -1,0 +1,24 @@
+{
+  "//": "Multi-server Discord bot configuration",
+  "token": "YOUR_BOT_TOKEN_HERE",
+  
+  "sessionMapping": {
+    "//": "Channel IDs map to WOPR session names",
+    "123456789012345678": "server1-general",
+    "234567890123456789": "server1-dev",
+    "345678901234567890": "server2-chat",
+    "456789012345678901": "server2-support",
+    "dm": "personal-assistant",
+    "default": "general"
+  },
+  
+  "dmPolicy": "allowlist",
+  "allowFrom": [
+    "123456789012345678"
+  ],
+  
+  "enableReactions": true,
+  "enableTyping": true,
+  "maxContextMessages": 50,
+  "responseChunkSize": 2000
+}
