@@ -1036,7 +1036,21 @@ async function handleMessage(message: Message) {
     } catch (e) {}
     logger.info({ msg: "handleMessage - complete success", sessionKey });
   } catch (error: any) {
-    logger.error({ msg: "handleMessage - inject failed", sessionKey, error: String(error) });
+    const errorStr = String(error);
+    const isCancelled = errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
+
+    // If this was an intentional cancellation, don't show error
+    if (isCancelled) {
+      logger.info({ msg: "handleMessage - inject was cancelled", sessionKey });
+      // Stream was already finalized by /cancel command, just clean up reaction
+      try {
+        const ackEmoji = getAckReaction();
+        await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id);
+      } catch (e) {}
+      return;
+    }
+
+    logger.error({ msg: "handleMessage - inject failed", sessionKey, error: errorStr });
     await stream.finalize();
     streams.delete(sessionKey);
     try {
