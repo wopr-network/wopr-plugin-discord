@@ -20,6 +20,12 @@ import winston from "winston";
 import path from "path";
 import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage, AgentIdentity } from "./types.js";
 
+const consoleFormat = winston.format.printf(({ level, message, msg, error, ...meta }) => {
+  const displayMsg = msg || message || "";
+  const errorInfo = error ? ` - ${error}` : "";
+  return `${level}: ${displayMsg}${errorInfo}`;
+});
+
 const logger = winston.createLogger({
   level: "debug",
   format: winston.format.combine(winston.format.timestamp(), winston.format.errors({ stack: true }), winston.format.json()),
@@ -27,7 +33,7 @@ const logger = winston.createLogger({
   transports: [
     new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"), level: "error" }),
     new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"), level: "debug" }),
-    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), winston.format.simple()), level: "warn" }),
+    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), consoleFormat), level: "warn" }),
   ],
 });
 
@@ -105,6 +111,19 @@ const commands = [
   new SlashCommandBuilder()
     .setName("help")
     .setDescription("Show available commands and help"),
+  new SlashCommandBuilder()
+    .setName("model")
+    .setDescription("Switch the AI model for this session")
+    .addStringOption(option =>
+      option.setName("model")
+        .setDescription("AI model to use")
+        .setRequired(true)
+        .addChoices(
+          { name: "⚡ Haiku 4.5 (Fast)", value: "haiku" },
+          { name: "🧠 Sonnet 4.5 (Balanced)", value: "sonnet" },
+          { name: "🔮 Opus 4.5 (Most Capable)", value: "opus" }
+        )
+    ),
 ];
 
 // Cache identity on init
@@ -148,6 +167,7 @@ interface SessionState {
   verbose: boolean;
   usageMode: string;
   messageCount: number;
+  model: string;
 }
 
 const sessionStates = new Map<string, SessionState>();
@@ -158,7 +178,8 @@ function getSessionState(sessionKey: string): SessionState {
       thinkingLevel: "medium",
       verbose: false,
       usageMode: "tokens",
-      messageCount: 0
+      messageCount: 0,
+      model: "claude-sonnet-4-20250514"
     });
   }
   return sessionStates.get(sessionKey)!;
@@ -426,12 +447,62 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
           `**/think <level>** - Set thinking level (off/minimal/low/medium/high/xhigh)\n` +
           `**/verbose <on/off>** - Toggle verbose mode\n` +
           `**/usage <mode>** - Set usage tracking (off/tokens/full)\n` +
+          `**/model <model>** - Switch AI model (sonnet/opus/haiku)\n` +
           `**/session <name>** - Switch to named session\n` +
           `**/wopr <message>** - Send message to WOPR\n` +
           `**/help** - Show this help\n\n` +
           `You can also mention me (@${client.user?.username}) to chat!`,
         ephemeral: true
       });
+      break;
+    }
+
+    case "model": {
+      const modelChoice = interaction.options.getString("model", true);
+
+      // Resolve simple names to model IDs (fetched from config or use latest)
+      const modelMap: Record<string, { id: string; name: string; emoji: string }> = {
+        haiku: { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", emoji: "⚡" },
+        sonnet: { id: "claude-sonnet-4-5-20250929", name: "Sonnet 4.5", emoji: "🧠" },
+        opus: { id: "claude-opus-4-5-20251101", name: "Opus 4.5", emoji: "🔮" },
+      };
+
+      const modelInfo = modelMap[modelChoice];
+      if (!modelInfo) {
+        await interaction.reply({
+          content: `❌ Unknown model: ${modelChoice}`,
+          ephemeral: true
+        });
+        break;
+      }
+
+      state.model = modelInfo.id;
+
+      // Update the session's provider model through WOPR context
+      try {
+        if (ctx.setSessionProvider) {
+          await ctx.setSessionProvider(sessionKey, "anthropic", { model: modelInfo.id });
+        } else {
+          // Fallback: use CLI via child_process (runs inside container)
+          const { exec } = await import("child_process");
+          const { promisify } = await import("util");
+          const execAsync = promisify(exec);
+          await execAsync(
+            `node /app/dist/cli.js session set-provider ${sessionKey} anthropic --model ${modelInfo.id}`
+          );
+        }
+
+        await interaction.reply({
+          content: `${modelInfo.emoji} **Model switched to:** ${modelInfo.name}\n\nAll future responses will use this model.`,
+          ephemeral: false
+        });
+      } catch (e) {
+        logger.error({ msg: "Failed to switch model", error: String(e) });
+        await interaction.reply({
+          content: `❌ Failed to switch model: ${e}`,
+          ephemeral: true
+        });
+      }
       break;
     }
   }
@@ -645,9 +716,16 @@ const plugin: WOPRPlugin = {
     
     await refreshIdentity();
     let config = ctx.getConfig<{token?: string; guildId?: string; clientId?: string}>();
-    if (!config?.token) { 
-      const legacy = ctx.getMainConfig("discord") as {token?: string}; 
-      if (legacy?.token) config = { token: legacy.token }; 
+    // Fall back to main config for Discord settings
+    const mainDiscordConfig = ctx.getMainConfig("discord") as {token?: string; clientId?: string; guildId?: string};
+    if (!config?.token && mainDiscordConfig?.token) {
+      config = { ...config, token: mainDiscordConfig.token };
+    }
+    if (!config?.clientId && mainDiscordConfig?.clientId) {
+      config = { ...config, clientId: mainDiscordConfig.clientId };
+    }
+    if (!config?.guildId && mainDiscordConfig?.guildId) {
+      config = { ...config, guildId: mainDiscordConfig.guildId };
     }
     if (!config?.token) { 
       logger.warn("Not configured"); 
@@ -664,7 +742,7 @@ const plugin: WOPRPlugin = {
       ] 
     });
     
-    client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error(e)));
+    client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
     client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.isChatInputCommand()) return;
       await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
@@ -674,19 +752,19 @@ const plugin: WOPRPlugin = {
       logger.info({ tag: client?.user?.tag });
       
       // Register slash commands
-      if (config.clientId) {
+      if (config.clientId && config.token) {
         await registerSlashCommands(config.token, config.clientId, config.guildId);
       } else {
         logger.warn("No clientId configured - slash commands not registered");
       }
     });
     
-    try { 
-      await client.login(config.token); 
-      logger.info("Discord bot started"); 
-    } catch (e) { 
-      logger.error(e); 
-      throw e; 
+    try {
+      await client.login(config.token);
+      logger.info("Discord bot started");
+    } catch (e) {
+      logger.error({ msg: "Discord login failed", error: String(e) });
+      throw e;
     }
   },
   async shutdown() { 

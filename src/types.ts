@@ -64,6 +64,13 @@ export interface UserProfile {
   notes?: string;
 }
 
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  available: boolean;
+  models?: string[];
+}
+
 export interface WOPRPluginContext {
   inject: (session: string, message: string, options?: InjectOptions) => Promise<string>;
   logMessage: (session: string, message: string, options?: LogMessageOptions) => void;
@@ -79,6 +86,9 @@ export interface WOPRPluginContext {
   registerConfigSchema: (pluginId: string, schema: ConfigSchema) => void;
   getPluginDir: () => string;
   log: PluginLogger;
+  // Provider/model management
+  getProviders?: () => Promise<ProviderInfo[]>;
+  setSessionProvider?: (session: string, provider: string, options?: { model?: string }) => Promise<void>;
 }
 
 export interface WOPRPlugin {
