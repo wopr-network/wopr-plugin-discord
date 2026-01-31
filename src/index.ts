@@ -2,19 +2,20 @@
  * WOPR Discord Plugin - With Slash Commands
  */
 
-import { 
-  Client, 
-  GatewayIntentBits, 
-  Events, 
-  Message, 
-  TextChannel, 
-  ThreadChannel, 
+import {
+  Client,
+  GatewayIntentBits,
+  Events,
+  Message,
+  TextChannel,
+  ThreadChannel,
   DMChannel,
   SlashCommandBuilder,
   REST,
   Routes,
   ChatInputCommandInteraction,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  Partials
 } from "discord.js";
 import winston from "winston";
 import path from "path";
@@ -171,6 +172,7 @@ interface SessionState {
   usageMode: string;
   messageCount: number;
   model: string;
+  lastBotInteraction?: Record<string, number>;  // botId -> timestamp for cooldown
 }
 
 const sessionStates = new Map<string, SessionState>();
@@ -186,6 +188,169 @@ function getSessionState(sessionKey: string): SessionState {
     });
   }
   return sessionStates.get(sessionKey)!;
+}
+
+// ============================================================================
+// Channel Message Queue System - manages bot-to-bot flow with human priority
+// ============================================================================
+
+interface BufferedMessage {
+  from: string;
+  content: string;
+  timestamp: number;
+  isBot: boolean;
+  isMention: boolean;  // was this bot directly @mentioned?
+  originalMessage: Message;
+}
+
+interface PendingBotResponse {
+  triggeredBy: string;       // bot ID that mentioned us
+  triggerMessage: Message;   // the message to reply to
+  queuedAt: number;
+  cooldownUntil: number;     // don't fire until this time (5s cooldown)
+}
+
+interface ChannelQueue {
+  buffer: BufferedMessage[];
+  pendingBotResponse: PendingBotResponse | null;
+  humanTypingUntil: number;  // timestamp when human typing window expires
+  isResponding: boolean;     // currently generating a response
+}
+
+const channelQueues = new Map<string, ChannelQueue>();
+const HUMAN_TYPING_WINDOW_MS = 15000;  // 15s after human stops typing
+const BOT_COOLDOWN_MS = 5000;          // 5s between bot responses
+
+function getChannelQueue(channelId: string): ChannelQueue {
+  if (!channelQueues.has(channelId)) {
+    channelQueues.set(channelId, {
+      buffer: [],
+      pendingBotResponse: null,
+      humanTypingUntil: 0,
+      isResponding: false
+    });
+  }
+  return channelQueues.get(channelId)!;
+}
+
+function addToBuffer(channelId: string, msg: BufferedMessage) {
+  const queue = getChannelQueue(channelId);
+  queue.buffer.push(msg);
+  // Keep buffer reasonable size (last 20 messages)
+  if (queue.buffer.length > 20) {
+    queue.buffer.shift();
+  }
+  logger.info({ msg: "Buffer add", channelId, from: msg.from, isBot: msg.isBot, isMention: msg.isMention, bufferSize: queue.buffer.length });
+}
+
+function getBufferContext(channelId: string): string {
+  const queue = getChannelQueue(channelId);
+  if (queue.buffer.length === 0) return "";
+
+  // Build context from buffer (exclude the triggering message itself)
+  const contextLines = queue.buffer.slice(0, -1).map(m => `${m.from}: ${m.content}`);
+  if (contextLines.length === 0) return "";
+
+  return `[Recent conversation context]\n${contextLines.join('\n')}\n[End context]\n\n`;
+}
+
+function clearBuffer(channelId: string) {
+  const queue = getChannelQueue(channelId);
+  queue.buffer = [];
+}
+
+function isHumanTyping(channelId: string): boolean {
+  const queue = getChannelQueue(channelId);
+  return Date.now() < queue.humanTypingUntil;
+}
+
+function setHumanTyping(channelId: string) {
+  const queue = getChannelQueue(channelId);
+  queue.humanTypingUntil = Date.now() + HUMAN_TYPING_WINDOW_MS;
+  logger.info({ msg: "Human typing detected", channelId, pauseUntil: new Date(queue.humanTypingUntil).toISOString() });
+}
+
+function queueBotResponse(channelId: string, botId: string, triggerMessage: Message) {
+  const queue = getChannelQueue(channelId);
+  queue.pendingBotResponse = {
+    triggeredBy: botId,
+    triggerMessage,
+    queuedAt: Date.now(),
+    cooldownUntil: Date.now() + BOT_COOLDOWN_MS
+  };
+  logger.info({ msg: "Bot response queued", channelId, botId, cooldownUntil: new Date(queue.pendingBotResponse.cooldownUntil).toISOString() });
+}
+
+function cancelPendingBotResponse(channelId: string) {
+  const queue = getChannelQueue(channelId);
+  if (queue.pendingBotResponse) {
+    logger.info({ msg: "Pending bot response cancelled", channelId });
+    queue.pendingBotResponse = null;
+  }
+}
+
+function getPendingBotResponse(channelId: string): PendingBotResponse | null {
+  const queue = getChannelQueue(channelId);
+  return queue.pendingBotResponse;
+}
+
+function setResponding(channelId: string, responding: boolean) {
+  const queue = getChannelQueue(channelId);
+  queue.isResponding = responding;
+}
+
+function isChannelResponding(channelId: string): boolean {
+  const queue = getChannelQueue(channelId);
+  return queue.isResponding;
+}
+
+// Check and fire pending bot responses (called periodically and on events)
+async function processPendingBotResponses() {
+  const now = Date.now();
+
+  for (const [channelId, queue] of channelQueues.entries()) {
+    // Skip if no pending response
+    if (!queue.pendingBotResponse) continue;
+
+    // Skip if currently responding
+    if (queue.isResponding) continue;
+
+    // Skip if human is typing
+    if (now < queue.humanTypingUntil) continue;
+
+    // Skip if still in cooldown
+    if (now < queue.pendingBotResponse.cooldownUntil) continue;
+
+    // Fire the pending response!
+    const pending = queue.pendingBotResponse;
+    queue.pendingBotResponse = null;
+
+    logger.info({ msg: "Firing queued bot response", channelId, triggeredBy: pending.triggeredBy });
+
+    // This will be handled by the message handler with context
+    await handleQueuedBotMention(channelId, pending.triggerMessage);
+  }
+}
+
+// Start periodic check for pending responses
+let queueProcessorInterval: NodeJS.Timeout | null = null;
+
+function startQueueProcessor() {
+  if (queueProcessorInterval) return;
+  queueProcessorInterval = setInterval(() => {
+    processPendingBotResponses().catch(err =>
+      logger.error({ msg: "Queue processor error", error: String(err) })
+    );
+  }, 1000);  // Check every second
+  logger.info({ msg: "Queue processor started" });
+}
+
+function stopQueueProcessor() {
+  if (queueProcessorInterval) {
+    clearInterval(queueProcessorInterval);
+    queueProcessorInterval = null;
+    logger.info({ msg: "Queue processor stopped" });
+  }
 }
 
 // Discord streaming message handler with explicit state machine
@@ -939,43 +1104,137 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
   }
 }
 
+// Handle queued bot mention (called by queue processor)
+async function handleQueuedBotMention(channelId: string, triggerMessage: Message) {
+  if (!client || !ctx) return;
+  if (!client.user) return;
+
+  const authorDisplayName = triggerMessage.member?.displayName || (triggerMessage.author as any).displayName || triggerMessage.author.username;
+
+  let messageContent = triggerMessage.content;
+  const botMention = `<@${client.user.id}>`;
+  const botNicknameMention = `<@!${client.user.id}>`;
+  messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+
+  if (!messageContent) return;
+
+  const sessionKey = `discord-${channelId}`;
+
+  // Get accumulated context from buffer
+  const bufferContext = getBufferContext(channelId);
+
+  // Prepend buffer context to message
+  const fullMessage = bufferContext + messageContent;
+
+  logger.info({ msg: "handleQueuedBotMention - firing with context", sessionKey, author: authorDisplayName, hasContext: bufferContext.length > 0 });
+
+  await executeInject(sessionKey, fullMessage, authorDisplayName, triggerMessage);
+}
+
 // Handle @mention messages
 async function handleMessage(message: Message) {
   if (!client || !ctx) return;
-  if (message.author.bot) return;
   if (!client.user) return;
 
   // Ignore slash command interactions
   if (message.interaction) return;
 
+  const channelId = message.channel.id;
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isDM = message.channel.type === 1;
+  const isBot = message.author.bot;
 
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
 
+  // Log ALL messages to WOPR conversation context
   try {
-    ctx.logMessage(`discord-${message.channel.id}`, message.content, {
+    ctx.logMessage(`discord-${channelId}`, message.content, {
       from: authorDisplayName,
-      channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name }
+      channel: { type: "discord", id: channelId, name: (message.channel as any).name }
     });
   } catch (e) {}
 
-  if (!isDirectlyMentioned && !isDM) return;
+  // Add ALL messages to our buffer (for context building)
+  addToBuffer(channelId, {
+    from: authorDisplayName,
+    content: message.content,
+    timestamp: Date.now(),
+    isBot,
+    isMention: isDirectlyMentioned,
+    originalMessage: message
+  });
 
-  let messageContent = message.content;
-  if (client.user && isDirectlyMentioned) {
-    const botMention = `<@${client.user.id}>`;
-    const botNicknameMention = `<@!${client.user.id}>`;
-    messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+  // === BOT MESSAGE HANDLING ===
+  if (isBot) {
+    if (!isDirectlyMentioned) return; // Bots must @mention us
+
+    // Queue the bot response (will fire after cooldown + human typing check)
+    queueBotResponse(channelId, message.author.id, message);
+    logger.info({ msg: "Bot @mention queued", channelId, botId: message.author.id, authorDisplayName });
+    return;
   }
 
-  if (!messageContent) return; // Skip empty mentions
+  // === HUMAN MESSAGE HANDLING ===
 
-  const sessionKey = `discord-${message.channel.id}`;
-  logger.info({ msg: "handleMessage - processing mention", sessionKey, author: authorDisplayName, contentLen: messageContent.length });
+  // Human @mention = immediate priority (cancel pending bot responses)
+  if (isDirectlyMentioned || isDM) {
+    cancelPendingBotResponse(channelId);
+
+    // Get accumulated context from buffer
+    const bufferContext = getBufferContext(channelId);
+
+    let messageContent = message.content;
+    if (client.user && isDirectlyMentioned) {
+      const botMention = `<@${client.user.id}>`;
+      const botNicknameMention = `<@!${client.user.id}>`;
+      messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+    }
+
+    // If message was just a mention with no text, use a default prompt
+    if (!messageContent) {
+      messageContent = "Hello! (You mentioned me without a message)";
+      logger.info({ msg: "Human @mention - empty message, using default", channelId });
+    }
+
+    // Prepend buffer context
+    const fullMessage = bufferContext + messageContent;
+
+    logger.info({ msg: "Human @mention - immediate response", channelId, hasContext: bufferContext.length > 0 });
+
+    await executeInject(`discord-${channelId}`, fullMessage, authorDisplayName, message);
+    return;
+  }
+
+  // Human message (no mention) = just logged to buffer above, nothing else to do
+}
+
+// Handle typing events - pause bot-to-bot when humans are typing
+function handleTypingStart(typing: any) {
+  if (!client) return;
+
+  // Ignore bot typing
+  if (typing.user.bot) return;
+
+  const channelId = typing.channel.id;
+  setHumanTyping(channelId);
+}
+
+// Core inject execution (shared by human mentions and queued bot mentions)
+async function executeInject(sessionKey: string, messageContent: string, authorDisplayName: string, replyToMessage: Message) {
+  if (!ctx) return;
+
+  const channelId = replyToMessage.channel.id;
+
+  // Don't start if already responding in this channel
+  if (isChannelResponding(channelId)) {
+    logger.info({ msg: "Skipping inject - already responding", sessionKey });
+    return;
+  }
+
+  setResponding(channelId, true);
 
   const ackEmoji = getAckReaction();
-  try { await message.react(ackEmoji); } catch (e) {}
+  try { await replyToMessage.react(ackEmoji); } catch (e) {}
 
   const state = getSessionState(sessionKey);
   state.messageCount++;
@@ -983,17 +1242,16 @@ async function handleMessage(message: Message) {
   // Clean up any existing stream for this session
   const existingStream = streams.get(sessionKey);
   if (existingStream) {
-    logger.info({ msg: "handleMessage - cleaning up existing stream", sessionKey });
+    logger.info({ msg: "executeInject - cleaning up existing stream", sessionKey });
     await existingStream.finalize();
   }
 
-  // Create new stream with explicit state machine
+  // Create new stream
   const stream = new DiscordMessageStream(
-    message.channel as TextChannel | ThreadChannel | DMChannel,
-    message
+    replyToMessage.channel as TextChannel | ThreadChannel | DMChannel,
+    replyToMessage
   );
   streams.set(sessionKey, stream);
-  logger.info({ msg: "handleMessage - stream created, calling inject", sessionKey });
 
   // Add thinking level context
   if (state.thinkingLevel !== "medium") {
@@ -1001,64 +1259,48 @@ async function handleMessage(message: Message) {
   }
 
   try {
-    logger.info({ msg: "handleMessage - inject starting", sessionKey });
+    logger.info({ msg: "executeInject - inject starting", sessionKey });
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: message.channel.id, name: (message.channel as any).name },
+      channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       onStream: (msg: StreamMessage) => {
         handleChunk(msg, sessionKey).catch((e) => logger.error({ msg: "Chunk error", sessionKey, error: String(e) }));
       }
     });
-    logger.info({ msg: "handleMessage - inject complete", sessionKey });
+    logger.info({ msg: "executeInject - inject complete", sessionKey });
 
     // Finalize the stream
-    logger.info({ msg: "handleMessage - finalizing stream", sessionKey });
     await stream.finalize();
     streams.delete(sessionKey);
-    logger.info({ msg: "handleMessage - stream finalized and removed", sessionKey });
 
-    // Append usage stats if enabled
-    const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
-    const lastMsg = stream.getLastMessage();
-    logger.debug({ msg: "handleMessage - appending usage", sessionKey, hasLastMsg: !!lastMsg, usageLen: usage.length });
-    if (usage && lastMsg) {
-      try {
-        await lastMsg.edit(lastMsg.content + usage);
-      } catch (e) {
-        logger.debug({ msg: "handleMessage - usage edit failed", sessionKey, error: String(e) });
-      }
-    }
-
+    // Clear ack reaction
     try {
-      const ackEmoji = getAckReaction();
-      await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id);
-      await message.react("✅");
+      await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
     } catch (e) {}
-    logger.info({ msg: "handleMessage - complete success", sessionKey });
+
+    // Clear buffer after successful response
+    clearBuffer(channelId);
+
   } catch (error: any) {
     const errorStr = String(error);
     const isCancelled = errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
 
-    // If this was an intentional cancellation, don't show error
     if (isCancelled) {
-      logger.info({ msg: "handleMessage - inject was cancelled", sessionKey });
-      // Stream was already finalized by /cancel command, just clean up reaction
+      logger.info({ msg: "executeInject - inject was cancelled", sessionKey });
       try {
-        const ackEmoji = getAckReaction();
-        await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id);
+        await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
       } catch (e) {}
-      return;
+    } else {
+      logger.error({ msg: "executeInject - inject failed", sessionKey, error: errorStr });
+      try {
+        await stream.finalize();
+        streams.delete(sessionKey);
+        await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
+        await replyToMessage.react("❌");
+      } catch (e) {}
     }
-
-    logger.error({ msg: "handleMessage - inject failed", sessionKey, error: errorStr });
-    await stream.finalize();
-    streams.delete(sessionKey);
-    try {
-      const ackEmoji = getAckReaction();
-      await message.reactions.cache.get(ackEmoji)?.users.remove(client.user.id);
-      await message.react("❌");
-    } catch (e) {}
-    await message.reply("Error processing your request.");
+  } finally {
+    setResponding(channelId, false);
   }
 }
 
@@ -1115,22 +1357,30 @@ const plugin: WOPRPlugin = {
       return; 
     }
     
-    client = new Client({ 
+    client = new Client({
       intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent, 
-        GatewayIntentBits.DirectMessages, 
-        GatewayIntentBits.GuildMessageReactions
-      ] 
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildMessageTyping  // For human typing detection
+      ],
+      partials: [Partials.Channel, Partials.Message]  // Required for DMs
     });
-    
+
     client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
     client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.isChatInputCommand()) return;
       await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
     });
-    
+
+    // Typing detection - pause bot-to-bot when humans are typing
+    client.on(Events.TypingStart, (typing) => handleTypingStart(typing));
+
+    // Start the queue processor for bot-to-bot responses
+    startQueueProcessor();
+
     client.on(Events.ClientReady, async () => {
       logger.info({ tag: client?.user?.tag });
       
@@ -1150,8 +1400,9 @@ const plugin: WOPRPlugin = {
       throw e;
     }
   },
-  async shutdown() { 
-    if (client) await client.destroy(); 
+  async shutdown() {
+    stopQueueProcessor();
+    if (client) await client.destroy();
   },
 };
 
