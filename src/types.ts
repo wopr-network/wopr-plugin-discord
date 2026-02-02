@@ -20,8 +20,11 @@ export interface ConfigSchema {
 }
 
 export interface StreamMessage {
-  type: "text" | "assistant";
+  type: "text" | "assistant" | "tool_use" | "complete" | "error" | "system";
   content: string;
+  toolName?: string;
+  subtype?: string;  // For system messages: "init", "compact_boundary", "status", etc.
+  metadata?: Record<string, unknown>;  // For system message metadata (e.g., compact_metadata)
 }
 
 export interface ChannelInfo {
@@ -36,6 +39,12 @@ export interface InjectOptions {
   from?: string;
   channel?: ChannelInfo;
   images?: string[];
+  /**
+   * Control which context providers to use.
+   * Use ['skills', 'bootstrap_files', 'session_system'] to get system context
+   * but skip conversation_history (when plugin handles its own context).
+   */
+  contextProviders?: string[];
 }
 
 export interface LogMessageOptions {
@@ -91,12 +100,88 @@ export interface WOPRPluginContext {
   setSessionProvider?: (session: string, provider: string, options?: { model?: string }) => Promise<void>;
   // Cancel an in-progress injection for a session
   cancelInject?: (session: string) => boolean;
+  // Channel provider registration
+  registerChannelProvider?: (provider: ChannelProvider) => void;
+  unregisterChannelProvider?: (id: string) => void;
+  // Extension registration (for cross-plugin APIs)
+  registerExtension?: (name: string, extension: unknown) => void;
+  unregisterExtension?: (name: string) => void;
+  getExtension?: <T = unknown>(name: string) => T | undefined;
+}
+
+export interface PluginCommand {
+  name: string;
+  description: string;
+  usage?: string;
+  handler: (ctx: WOPRPluginContext, args: string[]) => Promise<void>;
 }
 
 export interface WOPRPlugin {
   name: string;
   version: string;
   description: string;
+  commands?: PluginCommand[];
   init?: (context: WOPRPluginContext) => Promise<void>;
   shutdown?: () => Promise<void>;
+}
+
+// ============================================================================
+// Channel Provider Types (for cross-plugin protocol commands)
+// ============================================================================
+
+/**
+ * Context passed to channel command handlers
+ */
+export interface ChannelCommandContext {
+  channel: string;           // Channel identifier (Discord channel ID)
+  channelType: string;       // "discord"
+  sender: string;            // Username of sender
+  args: string[];            // Command arguments
+  reply: (msg: string) => Promise<void>;
+  getBotUsername: () => string;
+}
+
+/**
+ * Context passed to channel message parsers
+ */
+export interface ChannelMessageContext {
+  channel: string;
+  channelType: string;
+  sender: string;
+  content: string;
+  reply: (msg: string) => Promise<void>;
+  getBotUsername: () => string;
+}
+
+/**
+ * A command that can be registered on channel providers
+ */
+export interface ChannelCommand {
+  name: string;
+  description: string;
+  handler: (ctx: ChannelCommandContext) => Promise<void>;
+}
+
+/**
+ * A message parser that watches channel messages
+ */
+export interface ChannelMessageParser {
+  id: string;
+  pattern: RegExp | ((msg: string) => boolean);
+  handler: (ctx: ChannelMessageContext) => Promise<void>;
+}
+
+/**
+ * Channel provider interface
+ */
+export interface ChannelProvider {
+  id: string;
+  registerCommand(cmd: ChannelCommand): void;
+  unregisterCommand(name: string): void;
+  getCommands(): ChannelCommand[];
+  addMessageParser(parser: ChannelMessageParser): void;
+  removeMessageParser(id: string): void;
+  getMessageParsers(): ChannelMessageParser[];
+  send(channel: string, content: string): Promise<void>;
+  getBotUsername(): string;
 }

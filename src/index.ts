@@ -15,11 +15,48 @@ import {
   Routes,
   ChatInputCommandInteraction,
   PermissionFlagsBits,
-  Partials
+  Partials,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder,
+  ButtonInteraction,
+  ComponentType,
 } from "discord.js";
 import winston from "winston";
 import path from "path";
-import type { WOPRPlugin, WOPRPluginContext, ConfigSchema, StreamMessage, AgentIdentity } from "./types.js";
+import { createWriteStream, existsSync, mkdirSync } from "fs";
+import { pipeline } from "stream/promises";
+import {
+  createFriendRequestButtons,
+  createFriendRequestEmbed,
+  storePendingButtonRequest,
+  getPendingButtonRequest,
+  removePendingButtonRequest,
+  isFriendRequestButton,
+  handleFriendButtonInteraction,
+  cleanupExpiredButtonRequests,
+  getOwnerUserId,
+} from "./friend-buttons.js";
+import {
+  createPairingRequest,
+  claimPairingCode,
+  buildPairingMessage,
+  hasOwner,
+  setOwner,
+  cleanupExpiredPairings,
+} from "./pairing.js";
+import type {
+  WOPRPlugin,
+  WOPRPluginContext,
+  ConfigSchema,
+  StreamMessage,
+  AgentIdentity,
+  ChannelProvider,
+  ChannelCommand,
+  ChannelMessageParser,
+  ChannelCommandContext,
+  ChannelMessageContext,
+} from "./types.js";
 
 const consoleFormat = winston.format.printf(({ level, message, msg, error, ...meta }) => {
   const displayMsg = msg || message || "";
@@ -41,6 +78,50 @@ const logger = winston.createLogger({
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
 let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
+
+/**
+ * Generate a readable session key from a Discord channel.
+ * Format:
+ * - Guild channels: discord:guildName:#channelName
+ * - Threads: discord:guildName:#parentChannel/threadName
+ * - DMs: discord:dm:username
+ */
+function getSessionKey(channel: TextChannel | ThreadChannel | DMChannel): string {
+  // Sanitize name for use in session key (lowercase, replace spaces with -)
+  const sanitize = (name: string) => name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-_]/g, '');
+
+  if (channel.isDMBased()) {
+    // DM channel - use recipient username
+    const dm = channel as DMChannel;
+    const recipientName = dm.recipient?.username || 'unknown';
+    return `discord:dm:${sanitize(recipientName)}`;
+  }
+
+  if (channel.isThread()) {
+    // Thread - include parent channel
+    const thread = channel as ThreadChannel;
+    const guildName = thread.guild?.name || 'unknown';
+    const parentName = thread.parent?.name || 'unknown';
+    return `discord:${sanitize(guildName)}:#${sanitize(parentName)}/${sanitize(thread.name)}`;
+  }
+
+  // Regular text channel
+  const textChannel = channel as TextChannel;
+  const guildName = textChannel.guild?.name || 'unknown';
+  return `discord:${sanitize(guildName)}:#${sanitize(textChannel.name)}`;
+}
+
+/**
+ * Get session key from interaction (for slash commands)
+ */
+function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction): string {
+  const channel = interaction.channel;
+  if (channel && (channel instanceof TextChannel || channel instanceof ThreadChannel || channel instanceof DMChannel)) {
+    return getSessionKey(channel);
+  }
+  // Fallback to channel ID if we can't resolve the channel type
+  return `discord:${interaction.channelId}`;
+}
 
 // Slash command definitions
 const commands = [
@@ -113,6 +194,14 @@ const commands = [
     .setName("help")
     .setDescription("Show available commands and help"),
   new SlashCommandBuilder()
+    .setName("claim")
+    .setDescription("Claim ownership of this bot with a pairing code (DM only)")
+    .addStringOption(option =>
+      option.setName("code")
+        .setDescription("The pairing code you received")
+        .setRequired(true)
+    ),
+  new SlashCommandBuilder()
     .setName("cancel")
     .setDescription("Cancel the current AI response in progress"),
   new SlashCommandBuilder()
@@ -160,6 +249,7 @@ const configSchema: ConfigSchema = {
     { name: "token", type: "password", label: "Discord Bot Token", placeholder: "Bot token from Discord Developer Portal", required: true, description: "Your Discord bot token" },
     { name: "guildId", type: "text", label: "Guild ID (optional)", placeholder: "Server ID to restrict bot to", description: "Restrict bot to a specific Discord server" },
     { name: "clientId", type: "text", label: "Application ID", placeholder: "From Discord Developer Portal", description: "Discord Application ID (for slash commands)" },
+    { name: "ownerUserId", type: "text", label: "Owner User ID (optional)", placeholder: "Your Discord user ID", description: "Receive private notifications for friend requests" },
     { name: "pairingRequests", type: "object", hidden: true, default: {} },
     { name: "mappings", type: "object", hidden: true, default: {} },
   ],
@@ -334,6 +424,7 @@ async function processPendingBotResponses() {
 
 // Start periodic check for pending responses
 let queueProcessorInterval: NodeJS.Timeout | null = null;
+let cleanupInterval: NodeJS.Timeout | null = null;
 
 function startQueueProcessor() {
   if (queueProcessorInterval) return;
@@ -345,12 +436,240 @@ function startQueueProcessor() {
   logger.info({ msg: "Queue processor started" });
 }
 
+function startCleanupInterval() {
+  if (cleanupInterval) return;
+  // Clean up expired pairings and button requests every minute
+  cleanupInterval = setInterval(() => {
+    cleanupExpiredPairings();
+    cleanupExpiredButtonRequests();
+  }, 60000);
+  logger.info({ msg: "Cleanup interval started" });
+}
+
 function stopQueueProcessor() {
   if (queueProcessorInterval) {
     clearInterval(queueProcessorInterval);
     queueProcessorInterval = null;
     logger.info({ msg: "Queue processor stopped" });
   }
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+}
+
+// ============================================================================
+// Channel Provider Implementation
+// ============================================================================
+
+// Registered commands and parsers from other plugins (e.g., P2P friend commands)
+const registeredCommands: Map<string, ChannelCommand> = new Map();
+const registeredParsers: Map<string, ChannelMessageParser> = new Map();
+
+/**
+ * Discord Channel Provider - allows other plugins to register commands and message parsers
+ */
+const discordChannelProvider: ChannelProvider = {
+  id: "discord",
+
+  registerCommand(cmd: ChannelCommand): void {
+    registeredCommands.set(cmd.name, cmd);
+    logger.info({ msg: "Channel command registered", name: cmd.name });
+  },
+
+  unregisterCommand(name: string): void {
+    registeredCommands.delete(name);
+  },
+
+  getCommands(): ChannelCommand[] {
+    return Array.from(registeredCommands.values());
+  },
+
+  addMessageParser(parser: ChannelMessageParser): void {
+    registeredParsers.set(parser.id, parser);
+    logger.info({ msg: "Message parser registered", id: parser.id });
+  },
+
+  removeMessageParser(id: string): void {
+    registeredParsers.delete(id);
+  },
+
+  getMessageParsers(): ChannelMessageParser[] {
+    return Array.from(registeredParsers.values());
+  },
+
+  async send(channelId: string, content: string): Promise<void> {
+    if (!client) throw new Error("Discord client not initialized");
+    const channel = await client.channels.fetch(channelId);
+    if (channel && channel.isTextBased() && 'send' in channel) {
+      await channel.send(content);
+    }
+  },
+
+  getBotUsername(): string {
+    return client?.user?.username || "unknown";
+  },
+};
+
+/**
+ * Send a friend request notification to the owner with Accept/Deny buttons.
+ * Returns true if notification was sent, false if no owner configured.
+ */
+async function sendFriendRequestNotification(
+  requestFrom: string,
+  pubkey: string,
+  encryptPub: string,
+  channelId: string,
+  channelName: string,
+  signature: string
+): Promise<boolean> {
+  if (!ctx || !client) return false;
+
+  const config = ctx.getConfig<{ ownerUserId?: string }>();
+  if (!config.ownerUserId) {
+    logger.warn({ msg: "No ownerUserId configured - friend request notification not sent" });
+    return false;
+  }
+
+  try {
+    // Fetch the owner user
+    const owner = await client.users.fetch(config.ownerUserId);
+    if (!owner) {
+      logger.warn({ msg: "Could not fetch owner user", ownerUserId: config.ownerUserId });
+      return false;
+    }
+
+    // Store pending request for button handling
+    storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
+
+    // Create the embed and buttons
+    const pubkeyShort = pubkey.slice(0, 12) + "...";
+    const embed = createFriendRequestEmbed(requestFrom, pubkeyShort, channelName);
+    const buttons = createFriendRequestButtons(requestFrom);
+
+    // Send DM to owner
+    await owner.send({
+      embeds: [embed],
+      components: [buttons],
+    });
+
+    logger.info({ msg: "Friend request notification sent to owner", requestFrom, ownerUserId: config.ownerUserId });
+    return true;
+  } catch (err) {
+    logger.error({ msg: "Failed to send friend request notification", error: String(err) });
+    return false;
+  }
+}
+
+// Expose Discord extension to other plugins and CLI
+const discordExtension = {
+  sendFriendRequestNotification,
+  getBotUsername: () => client?.user?.username || "unknown",
+
+  // Pairing methods for CLI
+  claimOwnership: async (code: string): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
+    if (!ctx) return { success: false, error: "Discord plugin not initialized" };
+
+    const request = claimPairingCode(code);
+    if (!request) {
+      return { success: false, error: "Invalid or expired pairing code" };
+    }
+
+    // Set the owner in config
+    await setOwner(ctx, request.discordUserId);
+
+    return {
+      success: true,
+      userId: request.discordUserId,
+      username: request.discordUsername,
+    };
+  },
+
+  hasOwner: () => ctx ? hasOwner(ctx) : false,
+  getOwnerId: () => ctx?.getConfig<{ ownerUserId?: string }>()?.ownerUserId || null,
+};
+
+/**
+ * Check if a message matches a registered command and handle it
+ * Returns true if handled, false otherwise
+ */
+async function handleRegisteredCommand(message: Message): Promise<boolean> {
+  const content = message.content.trim();
+
+  // Check for /command format
+  if (!content.startsWith("/")) return false;
+
+  const parts = content.slice(1).split(/\s+/);
+  const cmdName = parts[0].toLowerCase();
+  const args = parts.slice(1);
+
+  const cmd = registeredCommands.get(cmdName);
+  if (!cmd) return false;
+
+  const channelId = message.channelId;
+
+  const cmdCtx: ChannelCommandContext = {
+    channel: channelId,
+    channelType: "discord",
+    sender: message.author.username,
+    args,
+    reply: async (msg: string) => {
+      await message.reply(msg);
+    },
+    getBotUsername: () => client?.user?.username || "unknown",
+  };
+
+  try {
+    await cmd.handler(cmdCtx);
+    return true;
+  } catch (error) {
+    logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
+    await message.reply(`Error executing /${cmdName}: ${error}`);
+    return true;  // Still handled, just with error
+  }
+}
+
+/**
+ * Check if a message matches any registered parser and handle it
+ * Returns true if handled, false otherwise
+ */
+async function handleRegisteredParsers(message: Message): Promise<boolean> {
+  const content = message.content;
+  const channelId = message.channelId;
+
+  for (const parser of registeredParsers.values()) {
+    let matches = false;
+
+    if (typeof parser.pattern === "function") {
+      matches = parser.pattern(content);
+    } else {
+      matches = parser.pattern.test(content);
+    }
+
+    if (matches) {
+      const msgCtx: ChannelMessageContext = {
+        channel: channelId,
+        channelType: "discord",
+        sender: message.author.username,
+        content,
+        reply: async (msg: string) => {
+          await message.reply(msg);
+        },
+        getBotUsername: () => client?.user?.username || "unknown",
+      };
+
+      try {
+        await parser.handler(msgCtx);
+        return true;
+      } catch (error) {
+        logger.error({ msg: "Message parser error", id: parser.id, error: String(error) });
+        // Don't reply with error for parsers - they're silent watchers
+        return false;
+      }
+    }
+  }
+
+  return false;
 }
 
 // Discord streaming message handler with explicit state machine
@@ -819,6 +1138,27 @@ async function handleChunk(msg: StreamMessage, sessionKey: string): Promise<void
     return;
   }
 
+  // Handle system messages (including auto-compaction notifications)
+  if (msg.type === "system" && msg.subtype === "compact_boundary") {
+    const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+    logger.info({ msg: "handleChunk - auto-compaction detected", sessionKey, metadata });
+
+    // Only notify for auto-compaction (not manual /compact which has its own handler)
+    if (metadata?.trigger === "auto") {
+      // Send a notification about auto-compaction
+      let notification = "📦 **Auto-Compaction**\n";
+      if (metadata.pre_tokens) {
+        notification += `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`;
+      } else {
+        notification += "Context has been automatically compressed";
+      }
+
+      // Append notification to the stream so it appears inline with the response
+      stream.append(`\n\n${notification}\n\n`);
+    }
+    return;
+  }
+
   // Extract text content from various message formats
   let textContent = "";
   if (msg.type === "text" && msg.content) {
@@ -841,12 +1181,58 @@ async function handleChunk(msg: StreamMessage, sessionKey: string): Promise<void
   }
 }
 
+// Attachments directory
+const ATTACHMENTS_DIR = existsSync("/data") ? "/data/attachments" : path.join(process.cwd(), "attachments");
+
+/**
+ * Download and save message attachments to disk
+ * Returns array of file paths
+ */
+async function saveAttachments(message: Message): Promise<string[]> {
+  if (!message.attachments.size) return [];
+
+  // Ensure attachments directory exists
+  if (!existsSync(ATTACHMENTS_DIR)) {
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+  }
+
+  const savedPaths: string[] = [];
+
+  for (const [, attachment] of message.attachments) {
+    try {
+      // Create unique filename: timestamp-originalname
+      const timestamp = Date.now();
+      const safeName = attachment.name?.replace(/[^a-zA-Z0-9._-]/g, "_") || "attachment";
+      const filename = `${timestamp}-${message.author.id}-${safeName}`;
+      const filepath = path.join(ATTACHMENTS_DIR, filename);
+
+      // Download the attachment
+      const response = await fetch(attachment.url);
+      if (!response.ok) {
+        logger.warn({ msg: "Failed to download attachment", url: attachment.url, status: response.status });
+        continue;
+      }
+
+      // Save to disk
+      const fileStream = createWriteStream(filepath);
+      await pipeline(response.body as any, fileStream);
+
+      savedPaths.push(filepath);
+      logger.info({ msg: "Attachment saved", filename, size: attachment.size, contentType: attachment.contentType });
+    } catch (err) {
+      logger.error({ msg: "Error saving attachment", name: attachment.name, error: String(err) });
+    }
+  }
+
+  return savedPaths;
+}
+
 // Handle slash commands
 async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
   if (!ctx || !client) return;
-  
+
   const { commandName } = interaction;
-  const sessionKey = `discord-${interaction.channelId}`;
+  const sessionKey = getSessionKeyFromInteraction(interaction);
   const state = getSessionState(sessionKey);
   
   logger.info({ msg: "Slash command received", command: commandName, user: interaction.user.tag });
@@ -881,16 +1267,36 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     
     case "compact": {
       await interaction.reply({
-        content: "📦 **Compacting Session**\n\nSummarizing conversation context...",
+        content: "📦 **Compacting Session**\n\nTriggering context compaction...",
         ephemeral: false
       });
-      
+
       try {
-        const summary = await ctx.inject(sessionKey, 
-          "Please provide a brief summary of our conversation so far. Keep it concise.", 
-          { silent: true }
-        );
-        await interaction.editReply(`📦 **Session Summary**\n\n${summary}`);
+        let compactMetadata: { pre_tokens?: number; trigger?: string } | undefined;
+
+        // Inject the actual /compact command to trigger Claude Code's internal compaction
+        const result = await ctx.inject(sessionKey, "/compact", {
+          silent: true,
+          onStream: (msg: StreamMessage) => {
+            // Capture compact_boundary metadata if available
+            if (msg.type === "system" && msg.subtype === "compact_boundary" && msg.metadata) {
+              compactMetadata = msg.metadata as { pre_tokens?: number; trigger?: string };
+            }
+          }
+        });
+
+        // Build response with metadata if available
+        let response = "📦 **Session Compacted**\n\n";
+        if (compactMetadata) {
+          if (compactMetadata.pre_tokens) {
+            response += `Compressed from ~${Math.round(compactMetadata.pre_tokens / 1000)}k tokens\n`;
+          }
+          response += `Trigger: ${compactMetadata.trigger || "manual"}`;
+        } else {
+          response += result || "Context has been compacted.";
+        }
+
+        await interaction.editReply(response);
       } catch (e) {
         await interaction.editReply("❌ Failed to compact session.");
       }
@@ -930,9 +1336,10 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     
     case "session": {
       const name = interaction.options.getString("name", true);
-      const newSessionKey = `discord-${interaction.channelId}-${name}`;
+      const baseKey = getSessionKeyFromInteraction(interaction);
+      const newSessionKey = `${baseKey}/${name}`;
       await interaction.reply({
-        content: `💬 **Switched to session:** ${name}\n\nNote: Each session maintains separate context.`,
+        content: `💬 **Switched to session:** ${newSessionKey}\n\nNote: Each session maintains separate context.`,
         ephemeral: false
       });
       break;
@@ -957,10 +1364,51 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
           `**/cancel** - Stop the current AI response\n` +
           `**/session <name>** - Switch to named session\n` +
           `**/wopr <message>** - Send message to WOPR\n` +
+          `**/claim <code>** - Claim bot ownership (DM only)\n` +
           `**/help** - Show this help\n\n` +
           `You can also mention me (@${client.user?.username}) to chat!`,
         ephemeral: true
       });
+      break;
+    }
+
+    case "claim": {
+      // Only allow in DMs
+      if (interaction.channel?.type !== 1) {
+        await interaction.reply({
+          content: "❌ The /claim command only works in DMs. Please DM me to claim ownership.",
+          ephemeral: true
+        });
+        break;
+      }
+
+      // Check if owner already set
+      if (hasOwner(ctx)) {
+        await interaction.reply({
+          content: "❌ This bot already has an owner configured.",
+          ephemeral: true
+        });
+        break;
+      }
+
+      const code = interaction.options.getString("code", true);
+      const result = await discordExtension.claimOwnership(code);
+
+      if (result.success) {
+        await interaction.reply({
+          content: `✅ **Ownership claimed!**\n\nYou are now the owner of this bot.\n\n` +
+            `**User ID:** ${result.userId}\n` +
+            `**Username:** ${result.username}\n\n` +
+            `You will receive private notifications for friend requests and other owner-only features.`,
+          ephemeral: false
+        });
+        logger.info({ msg: "Bot ownership claimed", userId: result.userId, username: result.username });
+      } else {
+        await interaction.reply({
+          content: `❌ **Claim failed:** ${result.error}\n\nMake sure you're using the correct code and it hasn't expired.`,
+          ephemeral: true
+        });
+      }
       break;
     }
 
@@ -1042,6 +1490,72 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       }
       break;
     }
+
+    default: {
+      // Check if this is a dynamically registered command from another plugin
+      const registeredCmd = registeredCommands.get(commandName);
+      if (registeredCmd) {
+        // Build args from interaction options, resolving Discord mentions to usernames
+        const args: string[] = [];
+        for (const option of interaction.options.data) {
+          if (option.value !== undefined) {
+            let value = String(option.value);
+            // Check for Discord user mention format <@USER_ID> or <@!USER_ID> and resolve to username
+            const mentionMatch = value.match(/^<@!?(\d+)>$/);
+            if (mentionMatch && client) {
+              try {
+                const user = await client.users.fetch(mentionMatch[1]);
+                if (user) {
+                  value = user.username;  // Use the actual username
+                  logger.info({ msg: "Resolved mention to username", original: String(option.value), resolved: value });
+                }
+              } catch (err) {
+                logger.warn({ msg: "Failed to resolve mention to username", value, error: String(err) });
+                // Fall back to stripping mention format manually
+                value = value.replace(/^<@!?/, "").replace(/>$/, "");
+              }
+            }
+            args.push(value);
+          }
+        }
+
+        // Create a reply function that handles the interaction
+        let replied = false;
+        const reply = async (msg: string) => {
+          if (!replied) {
+            await interaction.reply({ content: msg, ephemeral: false });
+            replied = true;
+          } else {
+            await interaction.followUp({ content: msg, ephemeral: false });
+          }
+        };
+
+        try {
+          // Execute the channel command handler
+          await registeredCmd.handler({
+            channel: interaction.channelId,
+            channelType: "discord",
+            sender: interaction.user.username,
+            args,
+            reply,
+            getBotUsername: () => client?.user?.username || "unknown",
+          });
+
+          // If handler didn't reply, send a default acknowledgment
+          if (!replied) {
+            await interaction.reply({ content: "✓ Command executed", ephemeral: true });
+          }
+        } catch (err) {
+          logger.error({ msg: "Channel command handler error", command: commandName, error: String(err) });
+          if (!replied) {
+            await interaction.reply({ content: `Error: ${err}`, ephemeral: true });
+          }
+        }
+      } else {
+        logger.warn({ msg: "Unknown slash command", command: commandName });
+      }
+      break;
+    }
   }
 }
 
@@ -1053,7 +1567,7 @@ async function getSessionInfo(sessionKey: string): Promise<string> {
 async function handleWoprMessage(interaction: ChatInputCommandInteraction, messageContent: string) {
   if (!ctx || !client) return;
 
-  const sessionKey = `discord-${interaction.channelId}`;
+  const sessionKey = getSessionKeyFromInteraction(interaction);
   const state = getSessionState(sessionKey);
   state.messageCount++;
 
@@ -1081,6 +1595,8 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
     const response = await ctx.inject(sessionKey, fullMessage, {
       from: interaction.user.username,
       channel: { type: "discord", id: interaction.channelId, name: "slash-command" },
+      // Skip conversation_history and channel_history - Discord handles its own context
+      contextProviders: ['session_system', 'skills', 'bootstrap_files'],
       onStream: (msg: StreamMessage) => {
         // Collect response for editing
         if (msg.type === "text" && msg.content) {
@@ -1118,7 +1634,7 @@ async function handleQueuedBotMention(channelId: string, triggerMessage: Message
 
   if (!messageContent) return;
 
-  const sessionKey = `discord-${channelId}`;
+  const sessionKey = getSessionKey(triggerMessage.channel as TextChannel | ThreadChannel | DMChannel);
 
   // Get accumulated context from buffer
   const bufferContext = getBufferContext(channelId);
@@ -1136,19 +1652,47 @@ async function handleMessage(message: Message) {
   if (!client || !ctx) return;
   if (!client.user) return;
 
-  // Ignore slash command interactions
+  // Ignore our own messages
+  if (message.author.id === client.user.id) return;
+
+  // Check for registered message parsers FIRST - they need to see ALL messages
+  // including slash command responses (which contain FRIEND_REQUEST/ACCEPT)
+  if (await handleRegisteredParsers(message)) {
+    return;  // Parser handled
+  }
+
+  // Ignore slash command interactions (for everything else)
   if (message.interaction) return;
+
+  const isDM = message.channel.type === 1;
+
+  // Handle owner pairing via DM when no owner is configured
+  if (isDM && !hasOwner(ctx)) {
+    const code = createPairingRequest(message.author.id, message.author.username);
+    const pairingMessage = buildPairingMessage(code);
+    await message.reply(pairingMessage);
+    logger.info({ msg: "Pairing code generated", userId: message.author.id, username: message.author.username });
+    return;
+  }
+
+  // Check for registered channel commands (e.g., /friend from P2P plugin)
+  if (await handleRegisteredCommand(message)) {
+    return;  // Command handled
+  }
+
+  // Note: Message parsers already checked above (before interaction check)
+  // to ensure FRIEND_REQUEST/ACCEPT messages from slash command responses are processed
 
   const channelId = message.channel.id;
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
-  const isDM = message.channel.type === 1;
   const isBot = message.author.bot;
 
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
 
   // Log ALL messages to WOPR conversation context
+  const sessionKey = getSessionKey(message.channel as TextChannel | ThreadChannel | DMChannel);
   try {
-    ctx.logMessage(`discord-${channelId}`, message.content, {
+    ctx.logMessage(sessionKey, message.content, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (message.channel as any).name }
     });
@@ -1190,7 +1734,17 @@ async function handleMessage(message: Message) {
       messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
     }
 
-    // If message was just a mention with no text, use a default prompt
+    // Handle attachments - save to disk and append paths
+    if (message.attachments.size > 0) {
+      const attachmentPaths = await saveAttachments(message);
+      if (attachmentPaths.length > 0) {
+        const attachmentInfo = attachmentPaths.map(p => `[Attachment: ${p}]`).join("\n");
+        messageContent = messageContent ? `${messageContent}\n\n${attachmentInfo}` : attachmentInfo;
+        logger.info({ msg: "Attachments appended to message", count: attachmentPaths.length, channelId });
+      }
+    }
+
+    // If message was just a mention with no text (and no attachments), use a default prompt
     if (!messageContent) {
       messageContent = "Hello! (You mentioned me without a message)";
       logger.info({ msg: "Human @mention - empty message, using default", channelId });
@@ -1201,7 +1755,7 @@ async function handleMessage(message: Message) {
 
     logger.info({ msg: "Human @mention - immediate response", channelId, hasContext: bufferContext.length > 0 });
 
-    await executeInject(`discord-${channelId}`, fullMessage, authorDisplayName, message);
+    await executeInject(sessionKey, fullMessage, authorDisplayName, message);
     return;
   }
 
@@ -1263,6 +1817,8 @@ async function executeInject(sessionKey: string, messageContent: string, authorD
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
+      // Skip conversation_history and channel_history - Discord handles its own context buffer
+      contextProviders: ['session_system', 'skills', 'bootstrap_files'],
       onStream: (msg: StreamMessage) => {
         handleChunk(msg, sessionKey).catch((e) => logger.error({ msg: "Chunk error", sessionKey, error: String(e) }));
       }
@@ -1335,10 +1891,68 @@ const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
   version: "2.11.0",
   description: "Discord bot with slash commands and identity support",
+  commands: [
+    {
+      name: "discord",
+      description: "Discord plugin commands",
+      usage: "wopr discord claim <code>",
+      async handler(_context: WOPRPluginContext, args: string[]) {
+        const [subcommand, ...rest] = args;
+
+        if (subcommand === "claim") {
+          const code = rest[0];
+          if (!code) {
+            console.log("Usage: wopr discord claim <code>");
+            console.log("  Claim ownership of the Discord bot using a pairing code");
+            process.exit(1);
+          }
+
+          // Call the daemon API to claim ownership
+          try {
+            const response = await fetch("http://localhost:7437/plugins/discord/claim", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ code }),
+            });
+            const result = await response.json() as { success?: boolean; userId?: string; username?: string; error?: string };
+
+            if (result.success) {
+              console.log(`✓ Discord ownership claimed!`);
+              console.log(`  Owner: ${result.username} (${result.userId})`);
+              process.exit(0);
+            } else {
+              console.log(`Failed to claim: ${result.error || "Unknown error"}`);
+              process.exit(1);
+            }
+          } catch (err) {
+            console.log(`Error: Could not connect to WOPR daemon. Is it running?`);
+            console.log(`  Start it with: wopr daemon start`);
+            process.exit(1);
+          }
+        } else {
+          console.log("Discord plugin commands:");
+          console.log("  wopr discord claim <code>  - Claim ownership using a pairing code");
+          process.exit(subcommand ? 1 : 0);
+        }
+      },
+    },
+  ],
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
-    
+
+    // Register as a channel provider so other plugins can add commands/parsers
+    if (ctx.registerChannelProvider) {
+      ctx.registerChannelProvider(discordChannelProvider);
+      logger.info("Registered Discord channel provider");
+    }
+
+    // Register the Discord extension so other plugins can send notifications
+    if (ctx.registerExtension) {
+      ctx.registerExtension("discord", discordExtension);
+      logger.info("Registered Discord extension");
+    }
+
     await refreshIdentity();
     let config = ctx.getConfig<{token?: string; guildId?: string; clientId?: string}>();
     // Fall back to main config for Discord settings
@@ -1371,8 +1985,53 @@ const plugin: WOPRPlugin = {
 
     client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
     client.on(Events.InteractionCreate, async (interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-      await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
+      // Handle slash commands
+      if (interaction.isChatInputCommand()) {
+        await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
+        return;
+      }
+
+      // Handle button interactions (friend request accept/deny)
+      if (interaction.isButton() && isFriendRequestButton(interaction.customId)) {
+        // Get P2P extension for friend request handling
+        const p2pExt = ctx?.getExtension?.("p2p") as {
+          acceptFriendRequest?: (from: string, pubkey: string, encryptPub: string, signature: string, channelId: string) => Promise<{ friend: any; acceptMessage: string }>;
+          denyFriendRequest?: (from: string, signature: string) => Promise<void>;
+        } | undefined;
+
+        await handleFriendButtonInteraction(
+          interaction,
+          ctx!,
+          client?.user?.username || "unknown",
+          // onAccept handler - returns the FRIEND_ACCEPT message to post
+          async (from: string, pending) => {
+            if (p2pExt?.acceptFriendRequest) {
+              const result = await p2pExt.acceptFriendRequest(
+                from,
+                pending.requestPubkey,
+                pending.encryptPub,
+                pending.signature,
+                pending.channelId
+              );
+              logger.info({ msg: "Friend request accepted via button", from, friend: result.friend.name });
+              return result.acceptMessage;
+            } else {
+              logger.warn({ msg: "P2P extension not available - cannot complete friendship" });
+              return `Accepted friend request from @${from} (but P2P extension not available)`;
+            }
+          },
+          // onDeny handler
+          async (from: string) => {
+            if (p2pExt?.denyFriendRequest) {
+              // Get pending request to find signature
+              const pending = getPendingButtonRequest(from);
+              await p2pExt.denyFriendRequest(from, pending?.signature || "");
+            }
+            logger.info({ msg: "Friend request denied via button", from });
+          }
+        ).catch(e => logger.error({ msg: "Button interaction error", error: String(e) }));
+        return;
+      }
     });
 
     // Typing detection - pause bot-to-bot when humans are typing
@@ -1380,6 +2039,9 @@ const plugin: WOPRPlugin = {
 
     // Start the queue processor for bot-to-bot responses
     startQueueProcessor();
+
+    // Start cleanup interval for expired pairings and button requests
+    startCleanupInterval();
 
     client.on(Events.ClientReady, async () => {
       logger.info({ tag: client?.user?.tag });
@@ -1402,6 +2064,12 @@ const plugin: WOPRPlugin = {
   },
   async shutdown() {
     stopQueueProcessor();
+    if (ctx?.unregisterChannelProvider) {
+      ctx.unregisterChannelProvider("discord");
+    }
+    if (ctx?.unregisterExtension) {
+      ctx.unregisterExtension("discord");
+    }
     if (client) await client.destroy();
   },
 };
