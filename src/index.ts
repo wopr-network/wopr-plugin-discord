@@ -819,7 +819,26 @@ const discordChannelProvider: ChannelProvider = {
     if (!client) throw new Error("Discord client not initialized");
     const channel = await client.channels.fetch(channelId);
     if (channel && channel.isTextBased() && 'send' in channel) {
-      await channel.send(content);
+      // Split content into chunks of 2000 chars (Discord limit)
+      const chunks: string[] = [];
+      let remaining = content;
+      while (remaining.length > 0) {
+        if (remaining.length <= 2000) {
+          chunks.push(remaining);
+          break;
+        }
+        // Try to split at a newline or space near the limit
+        let splitAt = remaining.lastIndexOf('\n', 2000);
+        if (splitAt < 1500) splitAt = remaining.lastIndexOf(' ', 2000);
+        if (splitAt < 1500) splitAt = 2000;
+        chunks.push(remaining.slice(0, splitAt));
+        remaining = remaining.slice(splitAt).trimStart();
+      }
+      for (const chunk of chunks) {
+        if (chunk.trim()) {
+          await channel.send(chunk);
+        }
+      }
     }
   },
 
@@ -2290,8 +2309,10 @@ const plugin: WOPRPlugin = {
     }
 
     // Subscribe to session:afterInject to deliver cron responses to Discord
+    logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
     if (ctx.events) {
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
+        logger.info({ msg: "session:afterInject event received", from: payload.from, session: payload.session });
         // Only handle cron-initiated responses for Discord sessions
         if (payload.from !== "cron") return;
         if (!payload.session.startsWith("discord:")) return;
