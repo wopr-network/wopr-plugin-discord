@@ -231,14 +231,48 @@ async function refreshIdentity() {
   } catch (e) {
     logger.warn({ msg: "Failed to refresh identity", error: String(e) });
   }
+  // Also refresh reaction emojis from config
+  await refreshReactionEmojis();
 }
 
-// Reaction emojis for message state
-const REACTION_QUEUED = "🕐";    // Message is queued, waiting
-const REACTION_ACTIVE = "⚡";    // Currently processing
-const REACTION_DONE = "✅";      // Successfully completed
-const REACTION_ERROR = "❌";     // Error occurred
-const REACTION_CANCELLED = "⏹️"; // Cancelled by user
+// Reaction emojis for message state - configurable via plugin settings
+let reactionEmojis = {
+  queued: "🕐",
+  active: "⚡",
+  done: "✅",
+  error: "❌",
+  cancelled: "⏹️",
+};
+
+function getReactionEmoji(state: keyof typeof reactionEmojis): string {
+  return reactionEmojis[state];
+}
+
+async function refreshReactionEmojis(): Promise<void> {
+  if (!ctx) return;
+  try {
+    const config = ctx.getConfig<Record<string, any>>();
+    if (config) {
+      reactionEmojis = {
+        queued: config.emojiQueued || "🕐",
+        active: config.emojiActive || "⚡",
+        done: config.emojiDone || "✅",
+        error: config.emojiError || "❌",
+        cancelled: config.emojiCancelled || "⏹️",
+      };
+      logger.info({ msg: "Reaction emojis refreshed", emojis: reactionEmojis });
+    }
+  } catch (e) {
+    logger.warn({ msg: "Failed to refresh reaction emojis", error: String(e) });
+  }
+}
+
+// Convenience getters
+const REACTION_QUEUED = () => reactionEmojis.queued;
+const REACTION_ACTIVE = () => reactionEmojis.active;
+const REACTION_DONE = () => reactionEmojis.done;
+const REACTION_ERROR = () => reactionEmojis.error;
+const REACTION_CANCELLED = () => reactionEmojis.cancelled;
 
 function getAckReaction(): string {
   return agentIdentity.emoji?.trim() || "👀";
@@ -252,11 +286,13 @@ function getMessagePrefix(): string {
 /**
  * Set reaction state on a message. Removes old state reactions first.
  */
-async function setMessageReaction(message: Message, reaction: string): Promise<void> {
+async function setMessageReaction(message: Message, reaction: string | (() => string)): Promise<void> {
   if (!client?.user) return;
 
   const botId = client.user.id;
-  const stateReactions = [REACTION_QUEUED, REACTION_ACTIVE, REACTION_DONE, REACTION_ERROR, REACTION_CANCELLED];
+  // Call functions to get current emoji values
+  const stateReactions = [REACTION_QUEUED(), REACTION_ACTIVE(), REACTION_DONE(), REACTION_ERROR(), REACTION_CANCELLED()];
+  const reactionValue = typeof reaction === 'function' ? reaction() : reaction;
 
   try {
     // Remove any existing state reactions from us
@@ -272,9 +308,9 @@ async function setMessageReaction(message: Message, reaction: string): Promise<v
     }
 
     // Add the new reaction
-    await message.react(reaction);
+    await message.react(reactionValue);
   } catch (e) {
-    logger.debug({ msg: "Failed to set reaction", reaction, error: String(e) });
+    logger.debug({ msg: "Failed to set reaction", reaction: reactionValue, error: String(e) });
   }
 }
 
@@ -285,7 +321,8 @@ async function clearMessageReactions(message: Message): Promise<void> {
   if (!client?.user) return;
 
   const botId = client.user.id;
-  const stateReactions = [REACTION_QUEUED, REACTION_ACTIVE, REACTION_DONE, REACTION_ERROR, REACTION_CANCELLED];
+  // Call functions to get current emoji values
+  const stateReactions = [REACTION_QUEUED(), REACTION_ACTIVE(), REACTION_DONE(), REACTION_ERROR(), REACTION_CANCELLED()];
 
   for (const emoji of stateReactions) {
     try {
@@ -299,6 +336,99 @@ async function clearMessageReactions(message: Message): Promise<void> {
   }
 }
 
+// ============================================================================
+// Typing Indicator Manager - Shows "Bot is typing..." during processing
+// ============================================================================
+
+interface TypingState {
+  interval: NodeJS.Timeout | null;
+  lastActivity: number;
+  active: boolean;
+}
+
+const typingStates = new Map<string, TypingState>();
+const TYPING_REFRESH_MS = 8000;  // Discord typing indicator lasts ~10s, refresh at 8s
+const TYPING_IDLE_TIMEOUT_MS = 5000;  // Stop typing after 5s of no activity
+
+/**
+ * Start showing typing indicator in a channel.
+ * Will auto-refresh every 8 seconds until stopped.
+ */
+async function startTyping(channel: TextChannel | ThreadChannel | DMChannel): Promise<void> {
+  const channelId = channel.id;
+
+  // Clean up any existing typing state
+  stopTyping(channelId);
+
+  const state: TypingState = {
+    interval: null,
+    lastActivity: Date.now(),
+    active: true
+  };
+
+  // Send initial typing indicator
+  try {
+    await channel.sendTyping();
+    logger.debug({ msg: "Typing indicator started", channelId });
+  } catch (e) {
+    logger.debug({ msg: "Failed to start typing indicator", channelId, error: String(e) });
+    return;
+  }
+
+  // Set up refresh interval
+  state.interval = setInterval(async () => {
+    const now = Date.now();
+    const idleTime = now - state.lastActivity;
+
+    // Stop if idle for too long
+    if (idleTime > TYPING_IDLE_TIMEOUT_MS) {
+      logger.debug({ msg: "Typing indicator stopped (idle)", channelId, idleTime });
+      stopTyping(channelId);
+      return;
+    }
+
+    // Refresh typing indicator
+    if (state.active) {
+      try {
+        await channel.sendTyping();
+        logger.debug({ msg: "Typing indicator refreshed", channelId });
+      } catch (e) {
+        // Channel might be gone, stop typing
+        stopTyping(channelId);
+      }
+    }
+  }, TYPING_REFRESH_MS);
+
+  typingStates.set(channelId, state);
+}
+
+/**
+ * Update activity timestamp to prevent idle timeout.
+ * Call this when receiving stream chunks.
+ */
+function tickTyping(channelId: string): void {
+  const state = typingStates.get(channelId);
+  if (state) {
+    state.lastActivity = Date.now();
+  }
+}
+
+/**
+ * Stop showing typing indicator in a channel.
+ */
+function stopTyping(channelId: string): void {
+  const state = typingStates.get(channelId);
+  if (state) {
+    state.active = false;
+    if (state.interval) {
+      clearInterval(state.interval);
+      state.interval = null;
+    }
+    typingStates.delete(channelId);
+    logger.debug({ msg: "Typing indicator stopped", channelId });
+  }
+}
+
 const configSchema: ConfigSchema = {
   title: "Discord Integration",
   description: "Configure Discord bot integration with slash commands",
@@ -307,6 +437,11 @@ const configSchema: ConfigSchema = {
     { name: "guildId", type: "text", label: "Guild ID (optional)", placeholder: "Server ID to restrict bot to", description: "Restrict bot to a specific Discord server" },
     { name: "clientId", type: "text", label: "Application ID", placeholder: "From Discord Developer Portal", description: "Discord Application ID (for slash commands)" },
     { name: "ownerUserId", type: "text", label: "Owner User ID (optional)", placeholder: "Your Discord user ID", description: "Receive private notifications for friend requests" },
+    { name: "emojiQueued", type: "text", label: "Queued Emoji", placeholder: "🕐", default: "🕐", description: "Emoji shown when message is queued" },
+    { name: "emojiActive", type: "text", label: "Active Emoji", placeholder: "⚡", default: "⚡", description: "Emoji shown when processing" },
+    { name: "emojiDone", type: "text", label: "Done Emoji", placeholder: "✅", default: "✅", description: "Emoji shown when complete" },
+    { name: "emojiError", type: "text", label: "Error Emoji", placeholder: "❌", default: "❌", description: "Emoji shown on error" },
+    { name: "emojiCancelled", type: "text", label: "Cancelled Emoji", placeholder: "⏹️", default: "⏹️", description: "Emoji shown when cancelled" },
     { name: "pairingRequests", type: "object", hidden: true, default: {} },
     { name: "mappings", type: "object", hidden: true, default: {} },
   ],
@@ -1938,6 +2073,10 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   // Transition from queued (🕐) to active (⚡)
   await setMessageReaction(replyToMessage, REACTION_ACTIVE);
 
+  // Start typing indicator
+  const channel = replyToMessage.channel as TextChannel | ThreadChannel | DMChannel;
+  await startTyping(channel);
+
   const state = getSessionState(sessionKey);
   state.messageCount++;
 
@@ -1971,6 +2110,8 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
       onStream: (msg: StreamMessage) => {
         // Check cancellation during streaming
         if (cancelToken.cancelled) return;
+        // Tick typing indicator on each chunk
+        tickTyping(channelId);
         handleChunk(msg, sessionKey).catch((e) => logger.error({ msg: "Chunk error", sessionKey, error: String(e) }));
       }
     });
@@ -1979,6 +2120,9 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
     // Finalize the stream
     await stream.finalize();
     streams.delete(sessionKey);
+
+    // Stop typing indicator
+    stopTyping(channelId);
 
     // Transition to done (✅)
     await setMessageReaction(replyToMessage, REACTION_DONE);
@@ -1989,6 +2133,9 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   } catch (error: any) {
     const errorStr = String(error);
     const isCancelled = cancelToken.cancelled || errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
+
+    // Stop typing indicator on any error
+    stopTyping(channelId);
 
     if (isCancelled) {
       logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey });
