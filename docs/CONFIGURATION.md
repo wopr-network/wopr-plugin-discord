@@ -7,32 +7,37 @@ Complete configuration reference for the WOPR Discord plugin.
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
 | `token` | string | **Yes** | - | Discord bot token |
-| `applicationId` | string | No | - | Discord application ID |
-| `publicKey` | string | No | - | For interaction verification |
-| `sessionMapping` | object | No | `{}` | Channel → session mapping |
-| `dmPolicy` | string | No | `"pairing"` | DM handling mode |
-| `allowFrom` | string[] | No | `[]` | Allowed user IDs |
-| `enableReactions` | boolean | No | `true` | Show 👀/✅ reactions |
-| `enableTyping` | boolean | No | `true` | Show typing indicator |
-| `maxContextMessages` | number | No | `50` | Messages for context |
-| `responseChunkSize` | number | No | `2000` | Max chars per message |
-| `commandPrefix` | string | No | `"!"` | Prefix for commands |
+| `clientId` | string | Recommended | - | Discord application ID (for slash commands) |
+| `guildId` | string | No | - | Guild ID for fast command registration |
+| `ownerUserId` | string | No | - | Discord user ID for owner notifications |
 
 ## Configuration Methods
 
-### 1. Via WOPR Config
+### 1. Via WOPR Config (Recommended)
 
 ```bash
+# Required
 wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_CLIENT_ID"
+
+# Optional
+wopr config set plugins.data.wopr-plugin-discord.guildId "YOUR_GUILD_ID"
+wopr config set plugins.data.wopr-plugin-discord.ownerUserId "YOUR_USER_ID"
 ```
 
-### 2. Via Environment Variable
+### 2. Via Legacy Config Keys
+
+For backward compatibility, the plugin also checks these keys:
 
 ```bash
-export DISCORD_BOT_TOKEN="YOUR_TOKEN"
+wopr config set discord.token YOUR_BOT_TOKEN
+wopr config set discord.clientId YOUR_CLIENT_ID
+wopr config set discord.guildId YOUR_GUILD_ID
 ```
 
 ### 3. Via Config File
+
+In your WOPR config file:
 
 ```json
 {
@@ -40,217 +45,245 @@ export DISCORD_BOT_TOKEN="YOUR_TOKEN"
     "data": {
       "wopr-plugin-discord": {
         "token": "YOUR_TOKEN",
-        "sessionMapping": {
-          "123456789": "general-session"
-        }
+        "clientId": "YOUR_CLIENT_ID",
+        "guildId": "YOUR_GUILD_ID",
+        "ownerUserId": "YOUR_USER_ID"
       }
     }
   }
 }
 ```
 
-## Detailed Options
-
-### token
-
-Your Discord bot token from the Developer Portal.
-
-**Security:** Keep this secret! Never commit to git.
-
-```json
-{ "token": "MTAxMD..." }
-```
-
-### sessionMapping
-
-Map Discord channel IDs to WOPR session names.
+Or using legacy keys:
 
 ```json
 {
-  "sessionMapping": {
-    "123456789012345678": "general",
-    "987654321098765432": "support",
-    "dm": "personal"
+  "discord": {
+    "token": "YOUR_TOKEN",
+    "clientId": "YOUR_CLIENT_ID",
+    "guildId": "YOUR_GUILD_ID"
   }
 }
 ```
 
-Special keys:
-- `"dm"` - Used for all DMs
-- `"default"` - Fallback for unmapped channels
+## Detailed Options
 
-### dmPolicy
+### token (Required)
 
-How to handle direct messages:
+Your Discord bot token from the Developer Portal.
 
-| Value | Description |
-|-------|-------------|
-| `"pairing"` | Require explicit user pairing (default) |
-| `"allowlist"` | Only allow listed user IDs |
-| `"open"` | Accept all DMs |
-| `"disabled"` | Ignore all DMs |
+**Where to find it:**
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Select your application
+3. Go to "Bot" section
+4. Click "Reset Token" to reveal it
 
-```json
-{ "dmPolicy": "allowlist" }
+**Security:** Keep this secret! Never commit to git or share publicly.
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.token "MTAxMD..."
 ```
 
-### allowFrom
+### clientId (Recommended)
 
-When `dmPolicy` is `"allowlist"`, list allowed Discord user IDs.
+Your Discord Application ID. Required for slash commands to register.
 
-```json
-{
-  "dmPolicy": "allowlist",
-  "allowFrom": ["123456789012345678", "876543210987654321"]
-}
+**Where to find it:**
+1. Go to Discord Developer Portal
+2. Select your application
+3. Copy the "Application ID" from General Information
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.clientId "123456789012345678"
 ```
 
-### enableReactions
+**Note:** Without this, slash commands will not be registered. Mentions (`@bot`) will still work.
 
-Show reaction emojis while processing:
-- 👀 - Processing started
-- ✅ - Success
-- ❌ - Error
+### guildId (Optional)
 
-```json
-{ "enableReactions": true }
+Restrict the bot to a specific Discord server. Useful for:
+- Development (instant command registration)
+- Private bots
+- Testing
+
+**Where to find it:**
+1. Enable Developer Mode in Discord (Settings -> Advanced)
+2. Right-click the server name
+3. Click "Copy Server ID"
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.guildId "987654321098765432"
 ```
 
-### enableTyping
+**Benefits:**
+- Slash commands register instantly (vs up to 1 hour globally)
+- Limits the bot's scope during development
+- Prevents accidental use in other servers
 
-Show typing indicator while generating response.
+### ownerUserId (Optional)
 
-```json
-{ "enableTyping": true }
+Your Discord user ID. When configured, you will receive:
+- Friend request notifications with Accept/Deny buttons
+- Private DM notifications for important events
+
+**Where to find it:**
+1. Enable Developer Mode in Discord
+2. Right-click your username (anywhere)
+3. Click "Copy User ID"
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.ownerUserId "111222333444555666"
 ```
 
-### maxContextMessages
+**Note:** You can also claim ownership dynamically via DM pairing. See the `/claim` command.
 
-Number of previous messages to include as context.
+## Automatic Values
 
-```json
-{ "maxContextMessages": 100 }
-```
+The following values are managed by the plugin automatically:
 
-### responseChunkSize
+| Key | Description |
+|-----|-------------|
+| `pairingRequests` | Pending owner pairing requests (internal) |
+| `mappings` | Channel/session mappings (internal) |
 
-Discord has a 2000 character limit. Messages longer than this are split.
+Do not modify these values manually.
 
-```json
-{ "responseChunkSize": 2000 }
-```
+## Session Keys
 
-### commandPrefix
+Sessions are automatically generated based on channel names:
 
-Prefix for bot commands (if implementing commands).
+| Channel Type | Session Key Format |
+|--------------|-------------------|
+| Guild channel | `discord:guild-name:#channel-name` |
+| Thread | `discord:guild-name:#parent-channel/thread-name` |
+| DM | `discord:dm:username` |
 
-```json
-{ "commandPrefix": "!" }
-```
+Session keys are sanitized:
+- Converted to lowercase
+- Spaces replaced with dashes
+- Special characters removed
 
-## Configuration Examples
+## Runtime Configuration
 
-### Basic Setup
+Some settings can be changed at runtime via slash commands:
 
-```json
-{
-  "token": "YOUR_BOT_TOKEN"
-}
-```
+| Setting | Command | Persistence |
+|---------|---------|-------------|
+| Thinking Level | `/think <level>` | Per-session (in memory) |
+| Verbose Mode | `/verbose <on/off>` | Per-session (in memory) |
+| Usage Tracking | `/usage <mode>` | Per-session (in memory) |
+| AI Model | `/model <model>` | Per-session (persisted) |
 
-### Multi-Server Setup
+## Discord Bot Setup
 
-```json
-{
-  "token": "YOUR_BOT_TOKEN",
-  "sessionMapping": {
-    "server1-general": "general",
-    "server1-dev": "development",
-    "server2-chat": "chat",
-    "dm": "personal"
-  },
-  "dmPolicy": "allowlist",
-  "allowFrom": ["YOUR_USER_ID"]
-}
-```
+### Required Intents
 
-### High-Performance Setup
+In Discord Developer Portal, enable these Privileged Gateway Intents:
 
-```json
-{
-  "token": "YOUR_BOT_TOKEN",
-  "maxContextMessages": 100,
-  "responseChunkSize": 1900,
-  "enableTyping": false,
-  "enableReactions": true
-}
-```
+- **MESSAGE CONTENT INTENT** - Read message content
+- **SERVER MEMBERS INTENT** - Access member info for display names
 
-### Restricted Setup
+### Required OAuth2 Scopes
 
-```json
-{
-  "token": "YOUR_BOT_TOKEN",
-  "sessionMapping": {
-    "specific-channel-id": "ai-chat"
-  },
-  "dmPolicy": "disabled",
-  "allowFrom": []
-}
-```
+When generating an invite URL:
 
-## Environment Variables
+- `bot` - Basic bot functionality
+- `applications.commands` - Register slash commands
 
-| Variable | Description |
-|----------|-------------|
-| `DISCORD_BOT_TOKEN` | Bot token (overrides config) |
-| `DISCORD_APPLICATION_ID` | Application ID |
-| `DISCORD_PUBLIC_KEY` | Public key for verification |
+### Required Permissions
 
-## Intents Required
+The bot needs these permissions in channels where it operates:
 
-In Discord Developer Portal, enable these intents:
+| Permission | Purpose |
+|------------|---------|
+| Send Messages | Send responses |
+| Read Message History | Build conversation context |
+| Add Reactions | Show processing status |
 
-- ✅ `MESSAGE CONTENT INTENT` - Read message content
-- ✅ `SERVER MEMBERS INTENT` - Access member list
-- ✅ `PRESENCE INTENT` - See online status
+Optional permissions for enhanced functionality:
 
-## Permissions Required
+| Permission | Purpose |
+|------------|---------|
+| Attach Files | Send files (if needed) |
+| Embed Links | Rich embeds |
+| Use External Emojis | Custom reactions |
 
-When adding bot to server, these permissions are needed:
+## Troubleshooting
 
-- **Send Messages** - Respond to mentions
-- **Read Message History** - Build context
-- **Add Reactions** - Show 👀/✅
-- **Use External Emojis** - Custom reactions
-- **Attach Files** - Image uploads (if needed)
-- **Embed Links** - Rich embeds
-
-## Troubleshooting Config Issues
-
-### "Token not set"
+### Token Issues
 
 ```bash
 # Check if configured
 wopr config get plugins.data.wopr-plugin-discord
 
-# Set it
-wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+# Check legacy location
+wopr config get discord
 ```
 
-### Bot not responding
+**"Invalid token"**
+1. Go to Discord Developer Portal
+2. Reset the bot token
+3. Update config with new token
+4. Restart daemon
 
-1. Check token is valid: Discord Developer Portal → Bot → Reset Token
-2. Verify bot is in server
-3. Check intents are enabled
-4. Review daemon logs: `wopr daemon logs`
+### Slash Commands Not Working
 
-### Wrong session context
+1. Verify `clientId` is set:
+   ```bash
+   wopr config get plugins.data.wopr-plugin-discord.clientId
+   ```
+
+2. Check that bot was invited with `applications.commands` scope
+
+3. For instant registration, set `guildId`:
+   ```bash
+   wopr config set plugins.data.wopr-plugin-discord.guildId "YOUR_GUILD_ID"
+   wopr daemon restart
+   ```
+
+### Owner Notifications Not Working
+
+1. Verify `ownerUserId` is set correctly
+2. Ensure you can receive DMs from the bot (same server, DMs enabled)
+3. Check daemon logs for errors
+
+### Connection Issues
+
+1. Check internet connection
+2. Verify Discord API status: https://discordstatus.com
+3. Check firewall allows outbound HTTPS (port 443)
+4. Review daemon logs: `wopr daemon logs | grep -i discord`
+
+## Example Configurations
+
+### Minimal Setup
 
 ```bash
-# Check session mapping
-wopr config get plugins.data.wopr-plugin-discord.sessionMapping
+wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_CLIENT_ID"
+```
 
-# Update for specific channel
-wopr config set plugins.data.wopr-plugin-discord.sessionMapping '{"CHANNEL_ID":"session-name"}'
+### Development Setup
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_CLIENT_ID"
+wopr config set plugins.data.wopr-plugin-discord.guildId "YOUR_TEST_SERVER_ID"
+```
+
+### Full Setup with Owner
+
+```bash
+wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_CLIENT_ID"
+wopr config set plugins.data.wopr-plugin-discord.ownerUserId "YOUR_USER_ID"
+```
+
+### Production Setup
+
+```bash
+# Token only for global registration (no guildId)
+wopr config set plugins.data.wopr-plugin-discord.token "YOUR_TOKEN"
+wopr config set plugins.data.wopr-plugin-discord.clientId "YOUR_CLIENT_ID"
+wopr config set plugins.data.wopr-plugin-discord.ownerUserId "YOUR_USER_ID"
 ```

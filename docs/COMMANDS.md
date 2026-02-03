@@ -1,6 +1,6 @@
 # Discord Slash Commands
 
-The WOPR Discord plugin provides native Discord slash commands for interacting with your AI assistant.
+The WOPR Discord plugin provides 13 native Discord slash commands for interacting with your AI assistant.
 
 ## Command Reference
 
@@ -16,7 +16,7 @@ Send a message to WOPR and get an AI response.
 /wopr Explain how neural networks work
 ```
 
-**Response:** Streaming AI response with typing indicator.
+**Response:** Streaming AI response with real-time updates via message editing.
 
 ---
 
@@ -31,13 +31,14 @@ Show current session status and configuration.
 
 **Response:**
 ```
-📊 Session Status
+Session Status
 
-Session: discord-123456789
+Session: discord:my-server:#general
 Thinking Level: medium
 Verbose Mode: Off
 Usage Tracking: tokens
 Messages: 42
+Session active
 ```
 
 ---
@@ -51,30 +52,36 @@ Reset the current session, clearing conversation history.
 /new
 ```
 
-**Response:** "🔄 Session Reset - Starting fresh! Your conversation history has been cleared."
+**Response:** "Session Reset - Starting fresh! Your conversation history has been cleared."
 
 ---
 
 ### `/compact`
 
-Summarize the conversation context to reduce token usage.
+Compact the conversation context by triggering WOPR's internal summarization. Useful when context is getting too long.
 
 **Example:**
 ```
 /compact
 ```
 
-**Response:** A concise summary of the conversation so far.
+**Response:**
+```
+Session Compacted
+
+Compressed from ~45k tokens
+Trigger: manual
+```
 
 ---
 
 ### `/think <level>`
 
-Set the thinking level for AI responses.
+Set the thinking level for AI responses. Higher levels enable deeper reasoning but take longer.
 
 **Parameters:**
 - `level` (required, string): One of:
-  - `off` - No thinking/reasoning
+  - `off` - No extended thinking
   - `minimal` - Minimal thinking
   - `low` - Low level thinking
   - `medium` - Balanced thinking (default)
@@ -86,13 +93,13 @@ Set the thinking level for AI responses.
 /think high
 ```
 
-**Response:** "🔬 Thinking level set to: high"
+**Response:** "Thinking level set to: high"
 
 ---
 
 ### `/verbose <enabled>`
 
-Toggle verbose mode for detailed responses.
+Toggle verbose mode for more detailed responses.
 
 **Parameters:**
 - `enabled` (required, boolean): `true` or `false`
@@ -102,7 +109,7 @@ Toggle verbose mode for detailed responses.
 /verbose true
 ```
 
-**Response:** "🔊 Verbose mode enabled"
+**Response:** "Verbose mode enabled"
 
 ---
 
@@ -121,25 +128,105 @@ Set usage tracking display mode.
 /usage full
 ```
 
-**Response:** "📈 Usage tracking set to: full"
+**Response:** "Usage tracking set to: full"
+
+---
+
+### `/model <model>`
+
+Switch the AI model for this session. Changes take effect immediately.
+
+**Parameters:**
+- `model` (required, string): One of:
+  - `haiku` - Haiku 4.5 (Fast, economical)
+  - `sonnet` - Sonnet 4.5 (Balanced, default)
+  - `opus` - Opus 4.5 (Most capable)
+
+**Example:**
+```
+/model opus
+```
+
+**Response:** "Model switched to: Opus 4.5 - All future responses will use this model."
+
+**Model Details:**
+
+| Model | ID | Best For |
+|-------|-----|----------|
+| Haiku | claude-haiku-4-5-20251001 | Quick responses, simple tasks |
+| Sonnet | claude-sonnet-4-5-20250929 | General use, balanced capability |
+| Opus | claude-opus-4-5-20251101 | Complex reasoning, difficult problems |
 
 ---
 
 ### `/session <name>`
 
-Switch to a different named session.
+Switch to a different named session. Each session maintains separate context.
 
 **Parameters:**
-- `name` (required, string): Session name
+- `name` (required, string): Session name suffix
 
 **Example:**
 ```
 /session coding
 ```
 
-**Response:** "💬 Switched to session: coding"
+**Response:** "Switched to session: discord:my-server:#general/coding"
 
-**Note:** Each session maintains separate context. Sessions are created on first use.
+**Note:** The session name is appended to the current channel's session key.
+
+---
+
+### `/cancel`
+
+Cancel the current AI response in progress. Useful if the AI is taking too long or going off-track.
+
+**Example:**
+```
+/cancel
+```
+
+**Response:** "Cancelled - The current response has been stopped."
+
+If no response is in progress: "Nothing to cancel - No response is currently in progress."
+
+---
+
+### `/claim <code>`
+
+Claim ownership of this bot using a pairing code. Only works in DMs.
+
+**Parameters:**
+- `code` (required, string): The 8-character pairing code
+
+**How to get a pairing code:**
+1. DM the bot when no owner is configured
+2. The bot responds with a pairing code
+3. Use `/claim` or run `wopr discord claim <code>` from CLI
+
+**Example:**
+```
+/claim ABCD1234
+```
+
+**Response (success):**
+```
+Ownership claimed!
+
+You are now the owner of this bot.
+
+User ID: 123456789012345678
+Username: alice
+
+You will receive private notifications for friend requests and other owner-only features.
+```
+
+**Response (failure):** "Claim failed: Invalid or expired pairing code"
+
+**Restrictions:**
+- Only works in DMs
+- Cannot be used if an owner is already configured
+- Pairing codes expire after 15 minutes
 
 ---
 
@@ -154,6 +241,8 @@ Show available commands and help information.
 
 **Response:** List of all available commands with descriptions.
 
+---
+
 ## Session State
 
 Each Discord channel maintains its own session state:
@@ -163,30 +252,40 @@ Each Discord channel maintains its own session state:
 | Thinking Level | `medium` | AI reasoning depth |
 | Verbose Mode | `false` | Detailed responses |
 | Usage Tracking | `tokens` | Show usage info |
+| Model | Sonnet 4.5 | AI model to use |
 | Message Count | `0` | Messages in session |
 
 Session state persists until:
 - `/new` or `/reset` is used
 - The WOPR daemon restarts
-- You switch sessions with `/session`
+
+## Session Key Format
+
+Sessions are automatically named based on the Discord channel:
+
+| Channel Type | Format | Example |
+|--------------|--------|---------|
+| Guild channel | `discord:guild:#channel` | `discord:my-server:#general` |
+| Thread | `discord:guild:#parent/thread` | `discord:my-server:#dev/bug-fix` |
+| DM | `discord:dm:username` | `discord:dm:alice` |
+
+Names are sanitized: lowercase, spaces become dashes, special characters removed.
 
 ## Slash Commands vs Mentions
 
-Both methods work, but have different use cases:
+Both methods work, with different characteristics:
 
 **Slash Commands (`/wopr`):**
-- ✅ Always available
-- ✅ Better mobile experience
-- ✅ Command autocomplete
-- ✅ Consistent interface
-- ❌ Requires `applications.commands` scope
+- Always available in the command picker
+- Better mobile experience with autocomplete
+- Immediate ephemeral feedback for some commands
+- Requires `applications.commands` OAuth scope
 
 **Mentions (`@WOPR`):**
-- ✅ No setup required
-- ✅ Works immediately after adding bot
-- ✅ Natural conversation flow
-- ❌ Requires MESSAGE CONTENT INTENT
-- ❌ Less discoverable
+- Works immediately after adding bot
+- Natural conversation flow
+- Includes recent channel context automatically
+- Requires MESSAGE CONTENT INTENT
 
 ## Permissions Required
 
@@ -200,7 +299,6 @@ For slash commands to work, the bot needs:
    - Send Messages
    - Read Message History
    - Add Reactions
-   - Use Slash Commands
 
 ## Troubleshooting
 
@@ -220,16 +318,14 @@ Ensure the bot has:
 
 ### Commands not appearing
 
-1. Check `clientId` is set correctly
+1. Check `clientId` is set correctly in plugin config
 2. Verify bot is in the server
 3. Check WOPR daemon logs: `wopr daemon logs | grep -i discord`
 4. Try kicking and re-inviting the bot
 
-### Old commands still showing
+### `/claim` not working
 
-Discord caches commands. To force refresh:
-1. Change the bot's command list (add a dummy command)
-2. Restart WOPR daemon
-3. Wait 1 hour for global refresh
-
-Or delete the guild-specific commands by kicking and re-adding the bot.
+1. Must be used in DMs, not a server channel
+2. Must have an unused pairing code (DM bot first to get one)
+3. Code expires after 15 minutes
+4. If owner already set, claim is rejected
