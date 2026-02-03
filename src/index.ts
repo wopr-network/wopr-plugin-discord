@@ -233,6 +233,13 @@ async function refreshIdentity() {
   }
 }
 
+// Reaction emojis for message state
+const REACTION_QUEUED = "🕐";    // Message is queued, waiting
+const REACTION_ACTIVE = "⚡";    // Currently processing
+const REACTION_DONE = "✅";      // Successfully completed
+const REACTION_ERROR = "❌";     // Error occurred
+const REACTION_CANCELLED = "⏹️"; // Cancelled by user
+
 function getAckReaction(): string {
   return agentIdentity.emoji?.trim() || "👀";
 }
@@ -240,6 +247,56 @@ function getAckReaction(): string {
 function getMessagePrefix(): string {
   const name = agentIdentity.name?.trim();
   return name ? `[${name}]` : "[WOPR]";
+}
+
+/**
+ * Set reaction state on a message. Removes old state reactions first.
+ */
+async function setMessageReaction(message: Message, reaction: string): Promise<void> {
+  if (!client?.user) return;
+
+  const botId = client.user.id;
+  const stateReactions = [REACTION_QUEUED, REACTION_ACTIVE, REACTION_DONE, REACTION_ERROR, REACTION_CANCELLED];
+
+  try {
+    // Remove any existing state reactions from us
+    for (const emoji of stateReactions) {
+      try {
+        const existingReaction = message.reactions.cache.get(emoji);
+        if (existingReaction?.users.cache.has(botId)) {
+          await existingReaction.users.remove(botId);
+        }
+      } catch (e) {
+        // Ignore - reaction might not exist
+      }
+    }
+
+    // Add the new reaction
+    await message.react(reaction);
+  } catch (e) {
+    logger.debug({ msg: "Failed to set reaction", reaction, error: String(e) });
+  }
+}
+
+/**
+ * Clear all state reactions from a message
+ */
+async function clearMessageReactions(message: Message): Promise<void> {
+  if (!client?.user) return;
+
+  const botId = client.user.id;
+  const stateReactions = [REACTION_QUEUED, REACTION_ACTIVE, REACTION_DONE, REACTION_ERROR, REACTION_CANCELLED];
+
+  for (const emoji of stateReactions) {
+    try {
+      const existingReaction = message.reactions.cache.get(emoji);
+      if (existingReaction?.users.cache.has(botId)) {
+        await existingReaction.users.remove(botId);
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
 }
 
 const configSchema: ConfigSchema = {
@@ -379,14 +436,26 @@ function queueInject(channelId: string, item: QueuedInject) {
     // Bot messages: add to pending with cooldown, processor will add to chain
     item.cooldownUntil = Date.now() + BOT_COOLDOWN_MS;
     queue.pendingItems.push(item);
+    // Show queued reaction
+    setMessageReaction(item.replyToMessage, REACTION_QUEUED).catch(() => {});
     logger.info({ msg: "Bot inject queued (pending cooldown)", channelId, from: item.authorDisplayName, queueSize: queue.pendingItems.length });
   } else {
     // Human messages: add directly to promise chain (immediate priority)
     // Also clear any pending bot messages - human takes priority
     if (queue.pendingItems.length > 0) {
       logger.info({ msg: "Clearing pending bot messages - human priority", channelId, cleared: queue.pendingItems.length });
+      // Clear queued reactions from cancelled bot messages
+      for (const pending of queue.pendingItems) {
+        clearMessageReactions(pending.replyToMessage).catch(() => {});
+      }
       queue.pendingItems = [];
     }
+
+    // Check if there's already something processing - if so, show queued first
+    if (queue.currentInject) {
+      setMessageReaction(item.replyToMessage, REACTION_QUEUED).catch(() => {});
+    }
+
     addToChain(channelId, item);
     logger.info({ msg: "Human inject queued (direct to chain)", channelId, from: item.authorDisplayName });
   }
@@ -430,17 +499,20 @@ function cancelChannelQueue(channelId: string): boolean {
   const queue = getChannelQueue(channelId);
   let hadSomething = false;
 
-  // Cancel current inject
+  // Cancel current inject (reaction will be set by executeInjectInternal when it detects cancellation)
   if (queue.currentInject) {
     queue.currentInject.cancelled = true;
     hadSomething = true;
     logger.info({ msg: "Current inject cancelled", channelId });
   }
 
-  // Clear pending items
+  // Clear pending items and set cancelled reaction on each
   if (queue.pendingItems.length > 0) {
     hadSomething = true;
     logger.info({ msg: "Pending items cleared", channelId, count: queue.pendingItems.length });
+    for (const item of queue.pendingItems) {
+      setMessageReaction(item.replyToMessage, REACTION_CANCELLED).catch(() => {});
+    }
     queue.pendingItems = [];
   }
 
@@ -1859,11 +1931,12 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   // Check cancellation before starting
   if (cancelToken.cancelled) {
     logger.info({ msg: "executeInjectInternal - cancelled before start", sessionKey });
+    await setMessageReaction(replyToMessage, REACTION_CANCELLED);
     return;
   }
 
-  const ackEmoji = getAckReaction();
-  try { await replyToMessage.react(ackEmoji); } catch (e) {}
+  // Transition from queued (🕐) to active (⚡)
+  await setMessageReaction(replyToMessage, REACTION_ACTIVE);
 
   const state = getSessionState(sessionKey);
   state.messageCount++;
@@ -1907,10 +1980,8 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
     await stream.finalize();
     streams.delete(sessionKey);
 
-    // Clear ack reaction
-    try {
-      await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
-    } catch (e) {}
+    // Transition to done (✅)
+    await setMessageReaction(replyToMessage, REACTION_DONE);
 
     // Clear buffer after successful response
     clearBuffer(channelId);
@@ -1924,15 +1995,14 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
       try {
         await stream.finalize();
         streams.delete(sessionKey);
-        await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
+        await setMessageReaction(replyToMessage, REACTION_CANCELLED);
       } catch (e) {}
     } else {
       logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, error: errorStr });
       try {
         await stream.finalize();
         streams.delete(sessionKey);
-        await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
-        await replyToMessage.react("❌");
+        await setMessageReaction(replyToMessage, REACTION_ERROR);
       } catch (e) {}
     }
   }
