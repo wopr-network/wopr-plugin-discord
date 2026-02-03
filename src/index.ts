@@ -2397,59 +2397,78 @@ const plugin: WOPRPlugin = {
       logger.info("Registered Discord extension");
     }
 
-    // Subscribe to session events to deliver cron messages and responses to Discord
+    // Subscribe to session events to deliver ALL session activity to Discord
+    // This includes: crons, sessions_send, P2P injects, CLI injects, etc.
     logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
     if (ctx.events) {
-      // Deliver the cron message (the prompt) to Discord first
+      // Deliver incoming messages to Discord (for visibility into what's being injected)
       ctx.events.on("session:beforeInject", async (payload: SessionInjectEvent) => {
-        // Only handle cron-initiated messages for Discord sessions
-        if (payload.from !== "cron") return;
+        // Only handle Discord sessions
         if (!payload.session.startsWith("discord:")) return;
         if (!payload.message) return;
 
-        logger.info({ msg: "Cron message for Discord session", session: payload.session });
+        // Skip messages that originated from Discord (already visible in channel)
+        // Check channel.type, not from (from is the username, not the channel type)
+        if (payload.channel?.type === "discord") return;
+
+        logger.info({ msg: "Session inject for Discord", session: payload.session, from: payload.from });
 
         // Find the channel ID from conversation log
         const channelId = findChannelIdFromConversationLog(payload.session);
         if (!channelId) {
-          logger.warn({ msg: "Could not find Discord channel ID for cron message", session: payload.session });
+          logger.warn({ msg: "Could not find Discord channel ID for inject", session: payload.session });
           return;
         }
 
-        // Deliver the cron message to Discord (formatted as a system/cron message)
+        // Format the source label
+        let sourceLabel = payload.from;
+        if (payload.from === "cron") {
+          sourceLabel = "Cron";
+        } else if (payload.from === "cli") {
+          sourceLabel = "CLI";
+        } else if (payload.from?.startsWith("p2p:")) {
+          sourceLabel = `P2P`;
+        } else if (payload.from?.startsWith("discord:")) {
+          sourceLabel = `Session: ${payload.from}`;
+        }
+
+        // Deliver the message to Discord (formatted with source label)
         try {
-          await discordChannelProvider.send(channelId, `**[Cron]** ${payload.message}`);
-          logger.info({ msg: "Delivered cron message to Discord", session: payload.session, channelId });
+          await discordChannelProvider.send(channelId, `**[${sourceLabel}]** ${payload.message}`);
+          logger.info({ msg: "Delivered inject message to Discord", session: payload.session, channelId, from: payload.from });
         } catch (err) {
-          logger.error({ msg: "Failed to deliver cron message to Discord", session: payload.session, channelId, error: String(err) });
+          logger.error({ msg: "Failed to deliver inject message to Discord", session: payload.session, channelId, error: String(err) });
         }
       });
 
-      // Deliver the AI response to the cron message
+      // Deliver AI responses to Discord
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
-        // Only handle cron-initiated responses for Discord sessions
-        if (payload.from !== "cron") return;
+        // Only handle Discord sessions
         if (!payload.session.startsWith("discord:")) return;
         if (!payload.response) return;
 
-        logger.info({ msg: "Cron response for Discord session", session: payload.session });
+        // Skip responses to Discord-originated messages (already handled by normal message flow)
+        // Check channel.type, not from (from is the username, not the channel type)
+        if ((payload as any).channel?.type === "discord") return;
+
+        logger.info({ msg: "Session response for Discord", session: payload.session, from: payload.from });
 
         // Find the channel ID from conversation log
         const channelId = findChannelIdFromConversationLog(payload.session);
         if (!channelId) {
-          logger.warn({ msg: "Could not find Discord channel ID for cron response", session: payload.session });
+          logger.warn({ msg: "Could not find Discord channel ID for response", session: payload.session });
           return;
         }
 
         // Deliver the response to Discord
         try {
           await discordChannelProvider.send(channelId, payload.response);
-          logger.info({ msg: "Delivered cron response to Discord", session: payload.session, channelId });
+          logger.info({ msg: "Delivered response to Discord", session: payload.session, channelId, from: payload.from });
         } catch (err) {
-          logger.error({ msg: "Failed to deliver cron response to Discord", session: payload.session, channelId, error: String(err) });
+          logger.error({ msg: "Failed to deliver response to Discord", session: payload.session, channelId, error: String(err) });
         }
       });
-      logger.info("Subscribed to session events for cron delivery");
+      logger.info("Subscribed to session events for Discord delivery");
     }
 
     await refreshIdentity();
