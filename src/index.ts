@@ -281,7 +281,7 @@ function getSessionState(sessionKey: string): SessionState {
 }
 
 // ============================================================================
-// Channel Message Queue System - manages bot-to-bot flow with human priority
+// Channel Message Queue System - Promise chain for sequential message processing
 // ============================================================================
 
 interface BufferedMessage {
@@ -293,18 +293,25 @@ interface BufferedMessage {
   originalMessage: Message;
 }
 
-interface PendingBotResponse {
-  triggeredBy: string;       // bot ID that mentioned us
-  triggerMessage: Message;   // the message to reply to
+interface QueuedInject {
+  sessionKey: string;
+  messageContent: string;
+  authorDisplayName: string;
+  replyToMessage: Message;
+  isBot: boolean;
   queuedAt: number;
-  cooldownUntil: number;     // don't fire until this time (5s cooldown)
+  cooldownUntil?: number;  // for bot messages only
 }
 
 interface ChannelQueue {
   buffer: BufferedMessage[];
-  pendingBotResponse: PendingBotResponse | null;
-  humanTypingUntil: number;  // timestamp when human typing window expires
-  isResponding: boolean;     // currently generating a response
+  // Promise chain - each inject waits for the previous to complete
+  processingChain: Promise<void>;
+  // Pending items waiting to be added to chain (for bot cooldown/human typing)
+  pendingItems: QueuedInject[];
+  humanTypingUntil: number;
+  // Track if we're currently processing (for /cancel)
+  currentInject: { cancelled: boolean } | null;
 }
 
 const channelQueues = new Map<string, ChannelQueue>();
@@ -315,9 +322,10 @@ function getChannelQueue(channelId: string): ChannelQueue {
   if (!channelQueues.has(channelId)) {
     channelQueues.set(channelId, {
       buffer: [],
-      pendingBotResponse: null,
+      processingChain: Promise.resolve(),
+      pendingItems: [],
       humanTypingUntil: 0,
-      isResponding: false
+      currentInject: null
     });
   }
   return channelQueues.get(channelId)!;
@@ -360,65 +368,126 @@ function setHumanTyping(channelId: string) {
   logger.info({ msg: "Human typing detected", channelId, pauseUntil: new Date(queue.humanTypingUntil).toISOString() });
 }
 
-function queueBotResponse(channelId: string, botId: string, triggerMessage: Message) {
+/**
+ * Queue an inject to the promise chain.
+ * Human messages go directly to chain. Bot messages wait for cooldown.
+ */
+function queueInject(channelId: string, item: QueuedInject) {
   const queue = getChannelQueue(channelId);
-  queue.pendingBotResponse = {
-    triggeredBy: botId,
-    triggerMessage,
-    queuedAt: Date.now(),
-    cooldownUntil: Date.now() + BOT_COOLDOWN_MS
-  };
-  logger.info({ msg: "Bot response queued", channelId, botId, cooldownUntil: new Date(queue.pendingBotResponse.cooldownUntil).toISOString() });
-}
 
-function cancelPendingBotResponse(channelId: string) {
-  const queue = getChannelQueue(channelId);
-  if (queue.pendingBotResponse) {
-    logger.info({ msg: "Pending bot response cancelled", channelId });
-    queue.pendingBotResponse = null;
+  if (item.isBot) {
+    // Bot messages: add to pending with cooldown, processor will add to chain
+    item.cooldownUntil = Date.now() + BOT_COOLDOWN_MS;
+    queue.pendingItems.push(item);
+    logger.info({ msg: "Bot inject queued (pending cooldown)", channelId, from: item.authorDisplayName, queueSize: queue.pendingItems.length });
+  } else {
+    // Human messages: add directly to promise chain (immediate priority)
+    // Also clear any pending bot messages - human takes priority
+    if (queue.pendingItems.length > 0) {
+      logger.info({ msg: "Clearing pending bot messages - human priority", channelId, cleared: queue.pendingItems.length });
+      queue.pendingItems = [];
+    }
+    addToChain(channelId, item);
+    logger.info({ msg: "Human inject queued (direct to chain)", channelId, from: item.authorDisplayName });
   }
 }
 
-function getPendingBotResponse(channelId: string): PendingBotResponse | null {
+/**
+ * Add an inject to the promise chain - it will execute after all previous injects complete.
+ */
+function addToChain(channelId: string, item: QueuedInject) {
   const queue = getChannelQueue(channelId);
-  return queue.pendingBotResponse;
+
+  queue.processingChain = queue.processingChain.then(async () => {
+    // Check if cancelled before starting
+    if (queue.currentInject?.cancelled) {
+      logger.info({ msg: "Inject skipped - queue was cancelled", channelId, from: item.authorDisplayName });
+      return;
+    }
+
+    // Create cancellation token for this inject
+    const cancelToken = { cancelled: false };
+    queue.currentInject = cancelToken;
+
+    try {
+      await executeInjectInternal(item, cancelToken);
+    } catch (error) {
+      logger.error({ msg: "Chain inject failed", channelId, error: String(error) });
+    } finally {
+      // Clear current inject if it's still ours
+      if (queue.currentInject === cancelToken) {
+        queue.currentInject = null;
+      }
+    }
+  });
 }
 
-function setResponding(channelId: string, responding: boolean) {
+/**
+ * Cancel current and pending injects for a channel.
+ * Returns true if there was something to cancel.
+ */
+function cancelChannelQueue(channelId: string): boolean {
   const queue = getChannelQueue(channelId);
-  queue.isResponding = responding;
+  let hadSomething = false;
+
+  // Cancel current inject
+  if (queue.currentInject) {
+    queue.currentInject.cancelled = true;
+    hadSomething = true;
+    logger.info({ msg: "Current inject cancelled", channelId });
+  }
+
+  // Clear pending items
+  if (queue.pendingItems.length > 0) {
+    hadSomething = true;
+    logger.info({ msg: "Pending items cleared", channelId, count: queue.pendingItems.length });
+    queue.pendingItems = [];
+  }
+
+  // Reset the chain to resolved (don't wait for cancelled items)
+  queue.processingChain = Promise.resolve();
+
+  return hadSomething;
 }
 
-function isChannelResponding(channelId: string): boolean {
+/**
+ * Get count of pending items in queue (for status display)
+ */
+function getQueuedCount(channelId: string): number {
   const queue = getChannelQueue(channelId);
-  return queue.isResponding;
+  return queue.pendingItems.length + (queue.currentInject ? 1 : 0);
 }
 
-// Check and fire pending bot responses (called periodically and on events)
+// Check and fire pending bot responses (called periodically)
 async function processPendingBotResponses() {
   const now = Date.now();
 
   for (const [channelId, queue] of channelQueues.entries()) {
-    // Skip if no pending response
-    if (!queue.pendingBotResponse) continue;
-
-    // Skip if currently responding
-    if (queue.isResponding) continue;
+    // Skip if no pending items
+    if (queue.pendingItems.length === 0) continue;
 
     // Skip if human is typing
     if (now < queue.humanTypingUntil) continue;
 
-    // Skip if still in cooldown
-    if (now < queue.pendingBotResponse.cooldownUntil) continue;
+    // Find items ready to fire (past cooldown)
+    const readyItems: QueuedInject[] = [];
+    const stillPending: QueuedInject[] = [];
 
-    // Fire the pending response!
-    const pending = queue.pendingBotResponse;
-    queue.pendingBotResponse = null;
+    for (const item of queue.pendingItems) {
+      if (item.cooldownUntil && now < item.cooldownUntil) {
+        stillPending.push(item);
+      } else {
+        readyItems.push(item);
+      }
+    }
 
-    logger.info({ msg: "Firing queued bot response", channelId, triggeredBy: pending.triggeredBy });
+    queue.pendingItems = stillPending;
 
-    // This will be handled by the message handler with context
-    await handleQueuedBotMention(channelId, pending.triggerMessage);
+    // Add ready items to chain
+    for (const item of readyItems) {
+      logger.info({ msg: "Moving pending item to chain", channelId, from: item.authorDisplayName });
+      addToChain(channelId, item);
+    }
   }
 }
 
@@ -1413,24 +1482,33 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     }
 
     case "cancel": {
-      const existingStream = streams.get(sessionKey);
+      const channelId = interaction.channelId;
 
-      // Try to cancel the injection via WOPR
-      let cancelled = false;
+      // Cancel the channel queue (current + pending)
+      const queueCancelled = cancelChannelQueue(channelId);
+
+      // Also try to cancel the injection via WOPR
+      let woprCancelled = false;
       if (ctx.cancelInject) {
-        cancelled = ctx.cancelInject(sessionKey);
+        woprCancelled = ctx.cancelInject(sessionKey);
       }
 
-      // Finalize and clean up the stream
+      // Finalize and clean up any existing stream
+      const existingStream = streams.get(sessionKey);
       if (existingStream) {
         logger.info({ msg: "Cancel command - finalizing stream", sessionKey });
         await existingStream.finalize();
         streams.delete(sessionKey);
       }
 
-      if (cancelled || existingStream) {
+      const pendingCount = getQueuedCount(channelId);
+      if (queueCancelled || woprCancelled || existingStream) {
+        let msg = "⏹️ **Cancelled**\n\nThe current response has been stopped.";
+        if (pendingCount > 0) {
+          msg += `\n\n_${pendingCount} queued message(s) also cleared._`;
+        }
         await interaction.reply({
-          content: "⏹️ **Cancelled**\n\nThe current response has been stopped.",
+          content: msg,
           ephemeral: false
         });
       } else {
@@ -1620,33 +1698,6 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
   }
 }
 
-// Handle queued bot mention (called by queue processor)
-async function handleQueuedBotMention(channelId: string, triggerMessage: Message) {
-  if (!client || !ctx) return;
-  if (!client.user) return;
-
-  const authorDisplayName = triggerMessage.member?.displayName || (triggerMessage.author as any).displayName || triggerMessage.author.username;
-
-  let messageContent = triggerMessage.content;
-  const botMention = `<@${client.user.id}>`;
-  const botNicknameMention = `<@!${client.user.id}>`;
-  messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
-
-  if (!messageContent) return;
-
-  const sessionKey = getSessionKey(triggerMessage.channel as TextChannel | ThreadChannel | DMChannel);
-
-  // Get accumulated context from buffer
-  const bufferContext = getBufferContext(channelId);
-
-  // Prepend buffer context to message
-  const fullMessage = bufferContext + messageContent;
-
-  logger.info({ msg: "handleQueuedBotMention - firing with context", sessionKey, author: authorDisplayName, hasContext: bufferContext.length > 0 });
-
-  await executeInject(sessionKey, fullMessage, authorDisplayName, triggerMessage);
-}
-
 // Handle @mention messages
 async function handleMessage(message: Message) {
   if (!client || !ctx) return;
@@ -1712,18 +1763,35 @@ async function handleMessage(message: Message) {
   if (isBot) {
     if (!isDirectlyMentioned) return; // Bots must @mention us
 
+    // Prepare message content
+    let messageContent = message.content;
+    const botMention = `<@${client.user.id}>`;
+    const botNicknameMention = `<@!${client.user.id}>`;
+    messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+
+    if (!messageContent) return; // Ignore empty bot mentions
+
+    // Get accumulated context from buffer
+    const bufferContext = getBufferContext(channelId);
+    const fullMessage = bufferContext + messageContent;
+
     // Queue the bot response (will fire after cooldown + human typing check)
-    queueBotResponse(channelId, message.author.id, message);
+    queueInject(channelId, {
+      sessionKey,
+      messageContent: fullMessage,
+      authorDisplayName,
+      replyToMessage: message,
+      isBot: true,
+      queuedAt: Date.now()
+    });
     logger.info({ msg: "Bot @mention queued", channelId, botId: message.author.id, authorDisplayName });
     return;
   }
 
   // === HUMAN MESSAGE HANDLING ===
 
-  // Human @mention = immediate priority (cancel pending bot responses)
+  // Human @mention = immediate priority
   if (isDirectlyMentioned || isDM) {
-    cancelPendingBotResponse(channelId);
-
     // Get accumulated context from buffer
     const bufferContext = getBufferContext(channelId);
 
@@ -1753,9 +1821,17 @@ async function handleMessage(message: Message) {
     // Prepend buffer context
     const fullMessage = bufferContext + messageContent;
 
-    logger.info({ msg: "Human @mention - immediate response", channelId, hasContext: bufferContext.length > 0 });
+    logger.info({ msg: "Human @mention - queueing (priority)", channelId, hasContext: bufferContext.length > 0 });
 
-    await executeInject(sessionKey, fullMessage, authorDisplayName, message);
+    // Queue with human priority (goes directly to chain, clears pending bot messages)
+    queueInject(channelId, {
+      sessionKey,
+      messageContent: fullMessage,
+      authorDisplayName,
+      replyToMessage: message,
+      isBot: false,
+      queuedAt: Date.now()
+    });
     return;
   }
 
@@ -1773,19 +1849,18 @@ function handleTypingStart(typing: any) {
   setHumanTyping(channelId);
 }
 
-// Core inject execution (shared by human mentions and queued bot mentions)
-async function executeInject(sessionKey: string, messageContent: string, authorDisplayName: string, replyToMessage: Message) {
+// Core inject execution - called from promise chain with cancellation support
+async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelled: boolean }) {
   if (!ctx) return;
 
+  const { sessionKey, messageContent: rawContent, authorDisplayName, replyToMessage } = item;
   const channelId = replyToMessage.channel.id;
 
-  // Don't start if already responding in this channel
-  if (isChannelResponding(channelId)) {
-    logger.info({ msg: "Skipping inject - already responding", sessionKey });
+  // Check cancellation before starting
+  if (cancelToken.cancelled) {
+    logger.info({ msg: "executeInjectInternal - cancelled before start", sessionKey });
     return;
   }
-
-  setResponding(channelId, true);
 
   const ackEmoji = getAckReaction();
   try { await replyToMessage.react(ackEmoji); } catch (e) {}
@@ -1796,7 +1871,7 @@ async function executeInject(sessionKey: string, messageContent: string, authorD
   // Clean up any existing stream for this session
   const existingStream = streams.get(sessionKey);
   if (existingStream) {
-    logger.info({ msg: "executeInject - cleaning up existing stream", sessionKey });
+    logger.info({ msg: "executeInjectInternal - cleaning up existing stream", sessionKey });
     await existingStream.finalize();
   }
 
@@ -1808,22 +1883,25 @@ async function executeInject(sessionKey: string, messageContent: string, authorD
   streams.set(sessionKey, stream);
 
   // Add thinking level context
+  let messageContent = rawContent;
   if (state.thinkingLevel !== "medium") {
     messageContent = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
   }
 
   try {
-    logger.info({ msg: "executeInject - inject starting", sessionKey });
+    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, from: authorDisplayName });
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       // Skip conversation_history and channel_history - Discord handles its own context buffer
       contextProviders: ['session_system', 'skills', 'bootstrap_files'],
       onStream: (msg: StreamMessage) => {
+        // Check cancellation during streaming
+        if (cancelToken.cancelled) return;
         handleChunk(msg, sessionKey).catch((e) => logger.error({ msg: "Chunk error", sessionKey, error: String(e) }));
       }
     });
-    logger.info({ msg: "executeInject - inject complete", sessionKey });
+    logger.info({ msg: "executeInjectInternal - inject complete", sessionKey });
 
     // Finalize the stream
     await stream.finalize();
@@ -1839,15 +1917,17 @@ async function executeInject(sessionKey: string, messageContent: string, authorD
 
   } catch (error: any) {
     const errorStr = String(error);
-    const isCancelled = errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
+    const isCancelled = cancelToken.cancelled || errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
 
     if (isCancelled) {
-      logger.info({ msg: "executeInject - inject was cancelled", sessionKey });
+      logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey });
       try {
+        await stream.finalize();
+        streams.delete(sessionKey);
         await replyToMessage.reactions.cache.get(ackEmoji)?.users.remove(client!.user!.id);
       } catch (e) {}
     } else {
-      logger.error({ msg: "executeInject - inject failed", sessionKey, error: errorStr });
+      logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, error: errorStr });
       try {
         await stream.finalize();
         streams.delete(sessionKey);
@@ -1855,8 +1935,6 @@ async function executeInject(sessionKey: string, messageContent: string, authorD
         await replyToMessage.react("❌");
       } catch (e) {}
     }
-  } finally {
-    setResponding(channelId, false);
   }
 }
 
