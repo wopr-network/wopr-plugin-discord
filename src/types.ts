@@ -99,6 +99,11 @@ export interface WOPREvent {
   source?: string;
 }
 
+export interface SessionCreateEvent {
+  session: string;
+  config?: any;
+}
+
 export interface SessionInjectEvent {
   session: string;
   message: string;

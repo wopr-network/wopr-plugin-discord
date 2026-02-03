@@ -21,6 +21,7 @@ import {
   ActionRowBuilder,
   ButtonInteraction,
   ComponentType,
+  ChannelType,
 } from "discord.js";
 import winston from "winston";
 import path from "path";
@@ -56,6 +57,7 @@ import type {
   ChannelMessageParser,
   ChannelCommandContext,
   ChannelMessageContext,
+  SessionCreateEvent,
   SessionInjectEvent,
   SessionResponseEvent,
 } from "./types.js";
@@ -2563,12 +2565,81 @@ const plugin: WOPRPlugin = {
 
     client.on(Events.ClientReady, async () => {
       logger.info({ tag: client?.user?.tag });
-      
+
       // Register slash commands
       if (config.clientId && config.token) {
         await registerSlashCommands(config.token, config.clientId, config.guildId);
       } else {
         logger.warn("No clientId configured - slash commands not registered");
+      }
+
+      // Subscribe to session:create to auto-create Discord channels
+      // Pattern: discord:{guild}:#{channel} -> create channel if it doesn't exist
+      if (ctx?.events) {
+        ctx.events.on("session:create", async (payload: SessionCreateEvent) => {
+          const sessionName = payload.session;
+
+          // Only handle Discord session patterns
+          const match = sessionName.match(/^discord:([^:]+):#(.+)$/);
+          if (!match) return;
+
+          const [, guildName, channelName] = match;
+          logger.info({ msg: "Session create for Discord pattern", sessionName, guildName, channelName });
+
+          // Find the guild
+          const guild = client?.guilds.cache.find(g =>
+            g.name.toLowerCase().replace(/\s+/g, "-") === guildName.toLowerCase() ||
+            g.name.toLowerCase() === guildName.toLowerCase()
+          );
+
+          if (!guild) {
+            logger.warn({ msg: "Guild not found for session", sessionName, guildName });
+            return;
+          }
+
+          // Check if channel already exists
+          const existingChannel = guild.channels.cache.find(c =>
+            c.name.toLowerCase() === channelName.toLowerCase() &&
+            c.type === ChannelType.GuildText
+          );
+
+          if (existingChannel) {
+            logger.debug({ msg: "Channel already exists", channelName, channelId: existingChannel.id });
+            return;
+          }
+
+          // Find WOPR category (or create one)
+          let woprCategory = guild.channels.cache.find(c =>
+            c.name.toLowerCase() === "wopr" &&
+            c.type === ChannelType.GuildCategory
+          );
+
+          if (!woprCategory) {
+            try {
+              woprCategory = await guild.channels.create({
+                name: "WOPR",
+                type: ChannelType.GuildCategory,
+              });
+              logger.info({ msg: "Created WOPR category", categoryId: woprCategory.id });
+            } catch (err) {
+              logger.error({ msg: "Failed to create WOPR category", error: String(err) });
+              return;
+            }
+          }
+
+          // Create the channel under WOPR category
+          try {
+            const newChannel = await guild.channels.create({
+              name: channelName,
+              type: ChannelType.GuildText,
+              parent: woprCategory.id,
+            });
+            logger.info({ msg: "Created Discord channel for session", channelName, channelId: newChannel.id, sessionName });
+          } catch (err) {
+            logger.error({ msg: "Failed to create Discord channel", channelName, error: String(err) });
+          }
+        });
+        logger.info("Subscribed to session:create for auto-channel creation");
       }
     });
     
