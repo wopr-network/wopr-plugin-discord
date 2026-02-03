@@ -58,10 +58,58 @@ import type {
   ChannelMessageContext,
 } from "./types.js";
 
-const consoleFormat = winston.format.printf(({ level, message, msg, error, ...meta }) => {
-  const displayMsg = msg || message || "";
-  const errorInfo = error ? ` - ${error}` : "";
-  return `${level}: ${displayMsg}${errorInfo}`;
+const consoleFormat = winston.format.printf((info) => {
+  const level = info.level;
+
+  // Try to extract message from various possible locations
+  let msg = "";
+  let errorStr = "";
+
+  // Case 1: info.message is a string
+  if (typeof info.message === "string") {
+    msg = info.message;
+  }
+  // Case 2: info.message is an object with msg property
+  else if (info.message && typeof info.message === "object") {
+    const msgObj = info.message as Record<string, unknown>;
+    if (typeof msgObj.msg === "string") {
+      msg = msgObj.msg;
+    }
+    if (typeof msgObj.error === "string") {
+      errorStr = ` - ${msgObj.error}`;
+    }
+    // If no msg property, stringify the whole object
+    if (!msg) {
+      try {
+        msg = JSON.stringify(msgObj);
+      } catch {
+        msg = "[unserializable object]";
+      }
+    }
+  }
+  // Case 3: Check top-level info for msg/error (Winston splat format)
+  else {
+    const topLevel = info as Record<string, unknown>;
+    if (typeof topLevel.msg === "string") {
+      msg = topLevel.msg;
+    }
+    if (typeof topLevel.error === "string") {
+      errorStr = ` - ${topLevel.error}`;
+    }
+  }
+
+  // Fallback: stringify the entire info object if we still have no message
+  if (!msg) {
+    try {
+      // Exclude metadata fields
+      const { level: _l, timestamp: _t, service: _s, ...rest } = info as Record<string, unknown>;
+      msg = Object.keys(rest).length > 0 ? JSON.stringify(rest) : "[empty message]";
+    } catch {
+      msg = "[unserializable]";
+    }
+  }
+
+  return `${level}: ${msg}${errorStr}`;
 });
 
 const logger = winston.createLogger({
