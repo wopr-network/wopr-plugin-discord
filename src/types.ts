@@ -90,6 +90,13 @@ export interface WOPREvent {
   source?: string;
 }
 
+export interface SessionInjectEvent {
+  session: string;
+  message: string;
+  from: string;
+  channel?: { type: string; id: string; name?: string };
+}
+
 export interface SessionResponseEvent {
   session: string;
   message: string;

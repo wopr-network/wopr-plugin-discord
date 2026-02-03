@@ -56,6 +56,7 @@ import type {
   ChannelMessageParser,
   ChannelCommandContext,
   ChannelMessageContext,
+  SessionInjectEvent,
   SessionResponseEvent,
 } from "./types.js";
 
@@ -2308,11 +2309,35 @@ const plugin: WOPRPlugin = {
       logger.info("Registered Discord extension");
     }
 
-    // Subscribe to session:afterInject to deliver cron responses to Discord
-    logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
+    // Subscribe to session events to deliver cron messages and responses to Discord
     if (ctx.events) {
+      // Deliver the cron message (the prompt) to Discord first
+      ctx.events.on("session:beforeInject", async (payload: SessionInjectEvent) => {
+        // Only handle cron-initiated messages for Discord sessions
+        if (payload.from !== "cron") return;
+        if (!payload.session.startsWith("discord:")) return;
+        if (!payload.message) return;
+
+        logger.info({ msg: "Cron message for Discord session", session: payload.session });
+
+        // Find the channel ID from conversation log
+        const channelId = findChannelIdFromConversationLog(payload.session);
+        if (!channelId) {
+          logger.warn({ msg: "Could not find Discord channel ID for cron message", session: payload.session });
+          return;
+        }
+
+        // Deliver the cron message to Discord (formatted as a system/cron message)
+        try {
+          await discordChannelProvider.send(channelId, `**[Cron]** ${payload.message}`);
+          logger.info({ msg: "Delivered cron message to Discord", session: payload.session, channelId });
+        } catch (err) {
+          logger.error({ msg: "Failed to deliver cron message to Discord", session: payload.session, channelId, error: String(err) });
+        }
+      });
+
+      // Deliver the AI response to the cron message
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
-        logger.info({ msg: "session:afterInject event received", from: payload.from, session: payload.session });
         // Only handle cron-initiated responses for Discord sessions
         if (payload.from !== "cron") return;
         if (!payload.session.startsWith("discord:")) return;
@@ -2335,7 +2360,7 @@ const plugin: WOPRPlugin = {
           logger.error({ msg: "Failed to deliver cron response to Discord", session: payload.session, channelId, error: String(err) });
         }
       });
-      logger.info("Subscribed to session:afterInject for cron delivery");
+      logger.info("Subscribed to session events for cron delivery");
     }
 
     await refreshIdentity();
