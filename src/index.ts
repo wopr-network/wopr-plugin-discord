@@ -24,7 +24,7 @@ import {
 } from "discord.js";
 import winston from "winston";
 import path from "path";
-import { createWriteStream, existsSync, mkdirSync } from "fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from "fs";
 import { pipeline } from "stream/promises";
 import {
   createFriendRequestButtons,
@@ -56,6 +56,7 @@ import type {
   ChannelMessageParser,
   ChannelCommandContext,
   ChannelMessageContext,
+  SessionResponseEvent,
 } from "./types.js";
 
 const consoleFormat = winston.format.printf(({ level, message, msg, error, ...meta }) => {
@@ -121,6 +122,46 @@ function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction):
   }
   // Fallback to channel ID if we can't resolve the channel type
   return `discord:${interaction.channelId}`;
+}
+
+/**
+ * Find the Discord channel ID from a session's conversation log.
+ * Looks for the most recent message with a Discord channel reference.
+ */
+function findChannelIdFromConversationLog(sessionName: string): string | null {
+  const sessionsDir = process.env.WOPR_HOME
+    ? path.join(process.env.WOPR_HOME, "sessions")
+    : "/data/sessions";
+  const logPath = path.join(sessionsDir, `${sessionName}.conversation.jsonl`);
+
+  if (!existsSync(logPath)) {
+    logger.debug({ msg: "Conversation log not found", sessionName, logPath });
+    return null;
+  }
+
+  try {
+    const content = readFileSync(logPath, "utf-8");
+    const lines = content.trim().split("\n").filter(l => l);
+
+    // Search from most recent entry backwards for a Discord channel reference
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.channel?.type === "discord" && entry.channel?.id) {
+          logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
+          return entry.channel.id;
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
+    return null;
+  } catch (err) {
+    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
+    return null;
+  }
 }
 
 // Slash command definitions
@@ -2246,6 +2287,34 @@ const plugin: WOPRPlugin = {
     if (ctx.registerExtension) {
       ctx.registerExtension("discord", discordExtension);
       logger.info("Registered Discord extension");
+    }
+
+    // Subscribe to session:afterInject to deliver cron responses to Discord
+    if (ctx.events) {
+      ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
+        // Only handle cron-initiated responses for Discord sessions
+        if (payload.from !== "cron") return;
+        if (!payload.session.startsWith("discord:")) return;
+        if (!payload.response) return;
+
+        logger.info({ msg: "Cron response for Discord session", session: payload.session });
+
+        // Find the channel ID from conversation log
+        const channelId = findChannelIdFromConversationLog(payload.session);
+        if (!channelId) {
+          logger.warn({ msg: "Could not find Discord channel ID for cron response", session: payload.session });
+          return;
+        }
+
+        // Deliver the response to Discord
+        try {
+          await discordChannelProvider.send(channelId, payload.response);
+          logger.info({ msg: "Delivered cron response to Discord", session: payload.session, channelId });
+        } catch (err) {
+          logger.error({ msg: "Failed to deliver cron response to Discord", session: payload.session, channelId, error: String(err) });
+        }
+      });
+      logger.info("Subscribed to session:afterInject for cron delivery");
     }
 
     await refreshIdentity();

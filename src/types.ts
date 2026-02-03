@@ -80,6 +80,35 @@ export interface ProviderInfo {
   models?: string[];
 }
 
+/**
+ * Event types from WOPR core
+ */
+export interface WOPREvent {
+  type: string;
+  payload: any;
+  timestamp: number;
+  source?: string;
+}
+
+export interface SessionResponseEvent {
+  session: string;
+  message: string;
+  response: string;
+  from: string;
+  channel?: { type: string; id: string; name?: string };
+}
+
+export type EventHandler<T = any> = (payload: T, event: WOPREvent) => void | Promise<void>;
+
+export interface WOPREventBus {
+  on(event: string, handler: EventHandler<any>): () => void;
+  once(event: string, handler: EventHandler<any>): void;
+  off(event: string, handler: EventHandler<any>): void;
+  emit(event: string, payload: any): Promise<void>;
+  emitCustom(event: string, payload: any): Promise<void>;
+  listenerCount(event: string): number;
+}
+
 export interface WOPRPluginContext {
   inject: (session: string, message: string, options?: InjectOptions) => Promise<string>;
   logMessage: (session: string, message: string, options?: LogMessageOptions) => void;
@@ -95,6 +124,8 @@ export interface WOPRPluginContext {
   registerConfigSchema: (pluginId: string, schema: ConfigSchema) => void;
   getPluginDir: () => string;
   log: PluginLogger;
+  // Event bus for reactive plugin composition
+  events?: WOPREventBus;
   // Provider/model management
   getProviders?: () => Promise<ProviderInfo[]>;
   setSessionProvider?: (session: string, provider: string, options?: { model?: string }) => Promise<void>;
