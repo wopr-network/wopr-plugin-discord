@@ -45,6 +45,15 @@ export interface InjectOptions {
    * but skip conversation_history (when plugin handles its own context).
    */
   contextProviders?: string[];
+  /**
+   * If true, allow V2 injection into active streams (default: true).
+   * Set to false if the plugin handles V2 injection itself.
+   */
+  allowV2Inject?: boolean;
+  /**
+   * Priority level (higher = processed first within queue)
+   */
+  priority?: number;
 }
 
 export interface LogMessageOptions {
@@ -138,6 +147,9 @@ export interface WOPRPluginContext {
   setSessionProvider?: (session: string, provider: string, options?: { model?: string }) => Promise<void>;
   // Cancel an in-progress injection for a session
   cancelInject?: (session: string) => boolean;
+  // V2 Session API - for injecting into active streaming sessions
+  hasActiveSession?: (session: string) => Promise<boolean>;
+  injectIntoActiveSession?: (session: string, message: string, options?: { from?: string; channel?: ChannelInfo }) => Promise<void>;
   // Channel provider registration
   registerChannelProvider?: (provider: ChannelProvider) => void;
   unregisterChannelProvider?: (id: string) => void;

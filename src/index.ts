@@ -1510,23 +1510,26 @@ class DiscordMessageStream {
   }
 }
 
-// Stream registry - one stream per session
+// Stream registry - one stream per MESSAGE (not session) to prevent race conditions
+// Key: Discord message ID that triggered the inject
 const streams = new Map<string, DiscordMessageStream>();
 
 /**
  * Handle an incoming stream chunk.
+ * @param msg - The stream message chunk
+ * @param streamKey - The Discord message ID (NOT session key) to prevent cross-message races
  */
-async function handleChunk(msg: StreamMessage, sessionKey: string): Promise<void> {
-  const stream = streams.get(sessionKey);
+async function handleChunk(msg: StreamMessage, streamKey: string): Promise<void> {
+  const stream = streams.get(streamKey);
   if (!stream) {
-    logger.warn({ msg: "handleChunk - no stream found", sessionKey, msgType: msg.type });
+    logger.warn({ msg: "handleChunk - no stream found", streamKey, msgType: msg.type });
     return;
   }
 
   // Handle system messages (including auto-compaction notifications)
   if (msg.type === "system" && msg.subtype === "compact_boundary") {
     const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
-    logger.info({ msg: "handleChunk - auto-compaction detected", sessionKey, metadata });
+    logger.info({ msg: "handleChunk - auto-compaction detected", streamKey, metadata });
 
     // Only notify for auto-compaction (not manual /compact which has its own handler)
     if (metadata?.trigger === "auto") {
@@ -1548,7 +1551,7 @@ async function handleChunk(msg: StreamMessage, sessionKey: string): Promise<void
   let textContent = "";
   if (msg.type === "text" && msg.content) {
     textContent = msg.content;
-    logger.debug({ msg: "handleChunk - text content", sessionKey, contentLen: textContent.length });
+    logger.debug({ msg: "handleChunk - text content", streamKey, contentLen: textContent.length });
   } else if (msg.type === "assistant" && (msg as any).message?.content) {
     const content = (msg as any).message.content;
     if (Array.isArray(content)) {
@@ -1556,9 +1559,9 @@ async function handleChunk(msg: StreamMessage, sessionKey: string): Promise<void
     } else if (typeof content === "string") {
       textContent = content;
     }
-    logger.debug({ msg: "handleChunk - assistant content", sessionKey, contentLen: textContent.length });
+    logger.debug({ msg: "handleChunk - assistant content", streamKey, contentLen: textContent.length });
   } else {
-    logger.debug({ msg: "handleChunk - skipping non-text", sessionKey, msgType: msg.type });
+    logger.debug({ msg: "handleChunk - skipping non-text", streamKey, msgType: msg.type });
   }
 
   if (textContent) {
@@ -1640,9 +1643,9 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     
     case "new":
     case "reset": {
-      // Reset the session
+      // Reset the session state (thinking level, verbose mode, etc.)
+      // Note: Streams are keyed by message ID now, not session - nothing to clean up here
       sessionStates.delete(sessionKey);
-      streams.delete(sessionKey);
       await interaction.reply({
         content: "🔄 **Session Reset**\n\nStarting fresh! Your conversation history has been cleared.",
         ephemeral: false
@@ -1801,6 +1804,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       const channelId = interaction.channelId;
 
       // Cancel the channel queue (current + pending)
+      // Note: Stream cleanup happens automatically in executeInjectInternal when it detects cancellation
       const queueCancelled = cancelChannelQueue(channelId);
 
       // Also try to cancel the injection via WOPR
@@ -1809,16 +1813,11 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
         woprCancelled = ctx.cancelInject(sessionKey);
       }
 
-      // Finalize and clean up any existing stream
-      const existingStream = streams.get(sessionKey);
-      if (existingStream) {
-        logger.info({ msg: "Cancel command - finalizing stream", sessionKey });
-        await existingStream.finalize();
-        streams.delete(sessionKey);
-      }
+      // Note: Streams are now keyed by message ID, not session. The stream for the cancelled
+      // message will be finalized by executeInjectInternal when it detects cancelToken.cancelled
 
       const pendingCount = getQueuedCount(channelId);
-      if (queueCancelled || woprCancelled || existingStream) {
+      if (queueCancelled || woprCancelled) {
         let msg = "⏹️ **Cancelled**\n\nThe current response has been stopped.";
         if (pendingCount > 0) {
           msg += `\n\n_${pendingCount} queued message(s) also cleared._`;
@@ -1974,13 +1973,7 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
     fullMessage = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
   }
 
-  // Clean up any existing stream
-  const existingStream = streams.get(sessionKey);
-  if (existingStream) {
-    await existingStream.finalize();
-    streams.delete(sessionKey);
-  }
-
+  // Note: Slash commands use direct interaction.editReply() - no stream needed
   // For slash commands, we use a simple buffer since we edit the deferred reply
   let responseBuffer = "";
   let lastEditLength = 0;
@@ -2102,8 +2095,9 @@ async function handleMessage(message: Message) {
           from: authorDisplayName,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
-        // Don't set DONE here - response is still streaming through the original session
-        // ACTIVE reaction stays until the session completes its response
+        // Mark as DONE - the response will flow through the existing session's stream
+        // Using a distinct emoji would be better UX but DONE is acceptable
+        await setMessageReaction(message, REACTION_DONE);
         clearBuffer(channelId);  // Clear buffer after successful V2 injection
         return;  // Success - don't fall through to queue
       } catch (error) {
@@ -2171,8 +2165,8 @@ async function handleMessage(message: Message) {
           from: authorDisplayName,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
-        // Don't set DONE here - response flows through existing stream
-        // ACTIVE reaction stays until the session completes its response
+        // Mark as DONE - the response will flow through the existing session's stream
+        await setMessageReaction(message, REACTION_DONE);
         clearBuffer(channelId);  // Clear buffer after successful V2 injection
         return;  // Success - don't fall through to queue
       } catch (error) {
@@ -2215,10 +2209,12 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
 
   const { sessionKey, messageContent: rawContent, authorDisplayName, replyToMessage } = item;
   const channelId = replyToMessage.channel.id;
+  // Use message ID as stream key to prevent race conditions between concurrent messages
+  const streamKey = replyToMessage.id;
 
   // Check cancellation before starting
   if (cancelToken.cancelled) {
-    logger.info({ msg: "executeInjectInternal - cancelled before start", sessionKey });
+    logger.info({ msg: "executeInjectInternal - cancelled before start", sessionKey, streamKey });
     await setMessageReaction(replyToMessage, REACTION_CANCELLED);
     return;
   }
@@ -2233,19 +2229,15 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   const state = getSessionState(sessionKey);
   state.messageCount++;
 
-  // Clean up any existing stream for this session
-  const existingStream = streams.get(sessionKey);
-  if (existingStream) {
-    logger.info({ msg: "executeInjectInternal - cleaning up existing stream", sessionKey });
-    await existingStream.finalize();
-  }
+  // NOTE: No need to clean up existing stream - each message has unique streamKey
+  // This prevents the race condition where concurrent messages would clobber each other's streams
 
-  // Create new stream
+  // Create new stream for THIS specific message
   const stream = new DiscordMessageStream(
     replyToMessage.channel as TextChannel | ThreadChannel | DMChannel,
     replyToMessage
   );
-  streams.set(sessionKey, stream);
+  streams.set(streamKey, stream);
 
   // Add thinking level context
   let messageContent = rawContent;
@@ -2254,25 +2246,29 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   }
 
   try {
-    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, from: authorDisplayName });
+    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: authorDisplayName });
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       // Skip conversation_history and channel_history - Discord handles its own context buffer
       contextProviders: ['session_system', 'skills', 'bootstrap_files'],
+      // Discord handles V2 injection itself before this point - don't let core try V2
+      // which would route responses to the wrong stream
+      allowV2Inject: false,
       onStream: (msg: StreamMessage) => {
         // Check cancellation during streaming
         if (cancelToken.cancelled) return;
         // Tick typing indicator on each chunk
         tickTyping(channelId);
-        handleChunk(msg, sessionKey).catch((e) => logger.error({ msg: "Chunk error", sessionKey, error: String(e) }));
+        // Use streamKey (message ID) not sessionKey to route chunks to correct stream
+        handleChunk(msg, streamKey).catch((e) => logger.error({ msg: "Chunk error", streamKey, error: String(e) }));
       }
     });
-    logger.info({ msg: "executeInjectInternal - inject complete", sessionKey });
+    logger.info({ msg: "executeInjectInternal - inject complete", sessionKey, streamKey });
 
     // Finalize the stream
     await stream.finalize();
-    streams.delete(sessionKey);
+    streams.delete(streamKey);
 
     // Stop typing indicator
     stopTyping(channelId);
@@ -2291,17 +2287,17 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
     stopTyping(channelId);
 
     if (isCancelled) {
-      logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey });
+      logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey, streamKey });
       try {
         await stream.finalize();
-        streams.delete(sessionKey);
+        streams.delete(streamKey);
         await setMessageReaction(replyToMessage, REACTION_CANCELLED);
       } catch (e) {}
     } else {
-      logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, error: errorStr });
+      logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, streamKey, error: errorStr });
       try {
         await stream.finalize();
-        streams.delete(sessionKey);
+        streams.delete(streamKey);
         await setMessageReaction(replyToMessage, REACTION_ERROR);
       } catch (e) {}
     }
