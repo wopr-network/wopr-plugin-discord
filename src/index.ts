@@ -2427,7 +2427,6 @@ const plugin: WOPRPlugin = {
 
       // Deliver the AI response to the cron message
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
-        logger.info({ msg: "session:afterInject event received", from: payload.from, session: payload.session });
         // Only handle cron-initiated responses for Discord sessions
         if (payload.from !== "cron") return;
         if (!payload.session.startsWith("discord:")) return;
