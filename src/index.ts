@@ -2091,6 +2091,27 @@ async function handleMessage(message: Message) {
     const bufferContext = getBufferContext(channelId);
     const fullMessage = bufferContext + messageContent;
 
+    // V2 Session API: If there's an active streaming session, inject directly
+    if (ctx.hasActiveSession && ctx.injectIntoActiveSession && (await ctx.hasActiveSession(sessionKey))) {
+      logger.info({ msg: "Bot @mention - injecting into active V2 session", channelId, sessionKey, botId: message.author.id });
+
+      await setMessageReaction(message, REACTION_ACTIVE);
+
+      try {
+        await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
+          from: authorDisplayName,
+          channel: { type: "discord", id: channelId, name: (message.channel as any).name }
+        });
+        // Don't set DONE here - response is still streaming through the original session
+        // ACTIVE reaction stays until the session completes its response
+        clearBuffer(channelId);  // Clear buffer after successful V2 injection
+        return;  // Success - don't fall through to queue
+      } catch (error) {
+        logger.error({ msg: "V2 inject failed for bot, falling back to queue", error: String(error) });
+        // Fall through to queue below
+      }
+    }
+
     // Queue the bot response (will fire after cooldown + human typing check)
     queueInject(channelId, {
       sessionKey,
@@ -2136,6 +2157,29 @@ async function handleMessage(message: Message) {
 
     // Prepend buffer context
     const fullMessage = bufferContext + messageContent;
+
+    // V2 Session API: If there's an active streaming session, inject directly
+    // instead of queuing (message gets sent to Claude immediately via session.send())
+    if (ctx.hasActiveSession && ctx.injectIntoActiveSession && (await ctx.hasActiveSession(sessionKey))) {
+      logger.info({ msg: "Human @mention - injecting into active V2 session", channelId, sessionKey });
+
+      // Add a reaction to show we received the message
+      await setMessageReaction(message, REACTION_ACTIVE);
+
+      try {
+        await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
+          from: authorDisplayName,
+          channel: { type: "discord", id: channelId, name: (message.channel as any).name }
+        });
+        // Don't set DONE here - response flows through existing stream
+        // ACTIVE reaction stays until the session completes its response
+        clearBuffer(channelId);  // Clear buffer after successful V2 injection
+        return;  // Success - don't fall through to queue
+      } catch (error) {
+        logger.error({ msg: "V2 inject failed, falling back to queue", error: String(error) });
+        // Fall through to queue below
+      }
+    }
 
     logger.info({ msg: "Human @mention - queueing (priority)", channelId, hasContext: bufferContext.length > 0 });
 
