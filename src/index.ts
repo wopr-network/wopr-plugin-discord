@@ -2095,8 +2095,9 @@ async function handleMessage(message: Message) {
           from: authorDisplayName,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
-        // Don't set DONE here - response is still streaming through the original session
-        // ACTIVE reaction stays until the session completes its response
+        // Mark as DONE - the response will flow through the existing session's stream
+        // Using a distinct emoji would be better UX but DONE is acceptable
+        await setMessageReaction(message, REACTION_DONE);
         clearBuffer(channelId);  // Clear buffer after successful V2 injection
         return;  // Success - don't fall through to queue
       } catch (error) {
@@ -2164,8 +2165,8 @@ async function handleMessage(message: Message) {
           from: authorDisplayName,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
-        // Don't set DONE here - response flows through existing stream
-        // ACTIVE reaction stays until the session completes its response
+        // Mark as DONE - the response will flow through the existing session's stream
+        await setMessageReaction(message, REACTION_DONE);
         clearBuffer(channelId);  // Clear buffer after successful V2 injection
         return;  // Success - don't fall through to queue
       } catch (error) {
