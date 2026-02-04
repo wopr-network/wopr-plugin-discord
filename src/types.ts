@@ -37,6 +37,8 @@ export interface InjectOptions {
   silent?: boolean;
   onStream?: (msg: StreamMessage) => void;
   from?: string;
+  /** Unique identifier for the sender (e.g., Discord user ID) */
+  senderId?: string;
   channel?: ChannelInfo;
   images?: string[];
   /**
@@ -58,6 +60,8 @@ export interface InjectOptions {
 
 export interface LogMessageOptions {
   from?: string;
+  /** Unique identifier for the sender (e.g., Discord user ID) */
+  senderId?: string;
   channel?: ChannelInfo;
 }
 
@@ -154,7 +158,7 @@ export interface WOPRPluginContext {
   cancelInject?: (session: string) => boolean;
   // V2 Session API - for injecting into active streaming sessions
   hasActiveSession?: (session: string) => Promise<boolean>;
-  injectIntoActiveSession?: (session: string, message: string, options?: { from?: string; channel?: ChannelInfo }) => Promise<void>;
+  injectIntoActiveSession?: (session: string, message: string, options?: { from?: string; senderId?: string; channel?: ChannelInfo }) => Promise<void>;
   // Channel provider registration
   registerChannelProvider?: (provider: ChannelProvider) => void;
   unregisterChannelProvider?: (id: string) => void;

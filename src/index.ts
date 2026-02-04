@@ -570,6 +570,7 @@ function getSessionState(sessionKey: string): SessionState {
 
 interface BufferedMessage {
   from: string;
+  senderId?: string;  // Discord user ID for unique identification
   content: string;
   timestamp: number;
   isBot: boolean;
@@ -581,6 +582,8 @@ interface QueuedInject {
   sessionKey: string;
   messageContent: string;
   authorDisplayName: string;
+  authorUsername: string;  // Discord username (unique per user)
+  authorId: string;        // Discord user ID (unique identifier)
   replyToMessage: Message;
   isBot: boolean;
   queuedAt: number;
@@ -2050,19 +2053,24 @@ async function handleMessage(message: Message) {
   const isBot = message.author.bot;
 
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
+  const authorUsername = message.author.username;
+  const authorId = message.author.id;
 
   // Log ALL messages to WOPR conversation context
+  // Include both display name and unique identifier so we can distinguish users
   const sessionKey = getSessionKey(message.channel as TextChannel | ThreadChannel | DMChannel);
   try {
     ctx.logMessage(sessionKey, message.content, {
-      from: authorDisplayName,
+      from: `${authorDisplayName} (@${authorUsername})`,
+      senderId: authorId,
       channel: { type: "discord", id: channelId, name: (message.channel as any).name }
     });
   } catch (e) {}
 
   // Add ALL messages to our buffer (for context building)
   addToBuffer(channelId, {
-    from: authorDisplayName,
+    from: `${authorDisplayName} (@${authorUsername})`,
+    senderId: authorId,
     content: message.content,
     timestamp: Date.now(),
     isBot,
@@ -2094,7 +2102,8 @@ async function handleMessage(message: Message) {
 
       try {
         await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
-          from: authorDisplayName,
+          from: `${authorDisplayName} (@${authorUsername})`,
+          senderId: authorId,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
         // Mark as DONE - the response will flow through the existing session's stream
@@ -2113,6 +2122,8 @@ async function handleMessage(message: Message) {
       sessionKey,
       messageContent: fullMessage,
       authorDisplayName,
+      authorUsername,
+      authorId,
       replyToMessage: message,
       isBot: true,
       queuedAt: Date.now()
@@ -2164,7 +2175,8 @@ async function handleMessage(message: Message) {
 
       try {
         await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
-          from: authorDisplayName,
+          from: `${authorDisplayName} (@${authorUsername})`,
+          senderId: authorId,
           channel: { type: "discord", id: channelId, name: (message.channel as any).name }
         });
         // Mark as DONE - the response will flow through the existing session's stream
@@ -2184,6 +2196,8 @@ async function handleMessage(message: Message) {
       sessionKey,
       messageContent: fullMessage,
       authorDisplayName,
+      authorUsername,
+      authorId,
       replyToMessage: message,
       isBot: false,
       queuedAt: Date.now()
@@ -2209,7 +2223,7 @@ function handleTypingStart(typing: any) {
 async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelled: boolean }) {
   if (!ctx) return;
 
-  const { sessionKey, messageContent: rawContent, authorDisplayName, replyToMessage } = item;
+  const { sessionKey, messageContent: rawContent, authorDisplayName, authorUsername, authorId, replyToMessage } = item;
   const channelId = replyToMessage.channel.id;
   // Use message ID as stream key to prevent race conditions between concurrent messages
   const streamKey = replyToMessage.id;
@@ -2248,9 +2262,11 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   }
 
   try {
-    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: authorDisplayName });
+    const fromDisplay = `${authorDisplayName} (@${authorUsername})`;
+    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: fromDisplay, senderId: authorId });
     await ctx.inject(sessionKey, messageContent, {
-      from: authorDisplayName,
+      from: fromDisplay,
+      senderId: authorId,
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       // Skip conversation_history and channel_history - Discord handles its own context buffer
       contextProviders: ['session_system', 'skills', 'bootstrap_files'],

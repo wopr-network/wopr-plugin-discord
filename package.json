@@ -1,6 +1,6 @@
 {
   "name": "wopr-plugin-discord",
-  "version": "2.11.0",
+  "version": "2.11.1",
   "description": "Discord bot integration for WOPR - Enables AI conversations in Discord channels",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
