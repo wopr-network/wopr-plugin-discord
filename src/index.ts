@@ -176,6 +176,36 @@ function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction):
 }
 
 /**
+ * Resolve Discord mentions in message content to readable names.
+ * Converts <@USER_ID> to @Username and <#CHANNEL_ID> to #channel-name
+ */
+function resolveMentions(message: Message): string {
+  let content = message.content;
+
+  // Resolve user mentions: <@USER_ID> or <@!USER_ID> -> @Username [USER_ID]
+  // Include both display name for readability AND ID for when WOPR needs to mention back
+  for (const [userId, user] of message.mentions.users) {
+    const member = message.guild?.members.cache.get(userId);
+    const displayName = member?.displayName || user.displayName || user.username;
+    // Replace both <@ID> and <@!ID> formats with @Name [ID]
+    content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `@${displayName} [${userId}]`);
+  }
+
+  // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
+  for (const [channelId, channel] of message.mentions.channels) {
+    const channelName = (channel as any).name || channelId;
+    content = content.replace(new RegExp(`<#${channelId}>`, 'g'), `#${channelName} [${channelId}]`);
+  }
+
+  // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
+  for (const [roleId, role] of message.mentions.roles) {
+    content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), `@${role.name} [${roleId}]`);
+  }
+
+  return content;
+}
+
+/**
  * Find the Discord channel ID from a session's conversation log.
  * Looks for the most recent message with a Discord channel reference.
  */
@@ -301,15 +331,86 @@ const commands = [
     .setDescription("Switch the AI model for this session")
     .addStringOption(option =>
       option.setName("model")
-        .setDescription("AI model to use")
+        .setDescription("Model name or ID (e.g. opus, haiku, gpt-5.2)")
         .setRequired(true)
-        .addChoices(
-          { name: "⚡ Haiku 4.5 (Fast)", value: "haiku" },
-          { name: "🧠 Sonnet 4.5 (Balanced)", value: "sonnet" },
-          { name: "🔮 Opus 4.5 (Most Capable)", value: "opus" }
-        )
+        .setAutocomplete(true)
     ),
 ];
+
+// Get all available models from all registered providers
+// Returns { providerId, modelId, displayName } for each model
+interface ResolvedModel {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+function getAllModels(): ResolvedModel[] {
+  const results: ResolvedModel[] = [];
+  // Get all registered providers via the plugin context
+  const providers = (ctx as any)?.getChannelProviders?.() || [];
+  // Direct approach: iterate known provider IDs from the registry
+  const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
+  for (const pid of providerIds) {
+    const provider = (ctx as any)?.getProvider?.(pid);
+    if (!provider?.supportedModels) continue;
+    for (const modelId of provider.supportedModels) {
+      results.push({
+        provider: pid,
+        id: modelId,
+        name: modelIdToDisplayName(modelId),
+      });
+    }
+  }
+  return results;
+}
+
+// Convert a model ID to a human-readable display name
+// "claude-opus-4-6" -> "Opus 4.6"
+// "claude-sonnet-4-5-20250929" -> "Sonnet 4.5"
+// "gpt-5.2" -> "GPT 5.2"
+// Unknown -> return as-is
+function modelIdToDisplayName(id: string): string {
+  // Claude models: claude-{tier}-{version}[-snapshot]
+  const claude = id.match(/^claude-(\w+)-(\d[\d.-]*)(?:-\d{8})?$/);
+  if (claude) {
+    const tier = claude[1].charAt(0).toUpperCase() + claude[1].slice(1);
+    const ver = claude[2].replace(/-/g, ".");
+    return `${tier} ${ver}`;
+  }
+  // GPT models
+  const gpt = id.match(/^gpt-(.+)$/i);
+  if (gpt) return `GPT ${gpt[1]}`;
+  // o-series (o1, o3, etc.)
+  const o = id.match(/^o(\d.*)$/);
+  if (o) return `o${o[1]}`;
+  return id;
+}
+
+// Resolve user input to a model - supports:
+// - Exact model ID: "claude-opus-4-6"
+// - Shortcut name: "opus", "haiku", "sonnet", "gpt"
+// - Partial match: "4.6", "codex"
+function resolveModel(input: string): { provider: string; id: string; name: string } | null {
+  const models = getAllModels();
+  if (models.length === 0) return null;
+
+  const q = input.toLowerCase().trim();
+
+  // Exact ID match
+  const exact = models.find(m => m.id === q);
+  if (exact) return exact;
+
+  // Substring match on model ID
+  const partial = models.find(m => m.id.includes(q));
+  if (partial) return partial;
+
+  // Substring match on display name
+  const byName = models.find(m => m.name.toLowerCase().includes(q));
+  if (byName) return byName;
+
+  return null;
+}
 
 // Cache identity on init
 async function refreshIdentity() {
@@ -1840,40 +1941,37 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     case "model": {
       const modelChoice = interaction.options.getString("model", true);
 
-      // Resolve simple names to model IDs (fetched from config or use latest)
-      const modelMap: Record<string, { id: string; name: string; emoji: string }> = {
-        haiku: { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", emoji: "⚡" },
-        sonnet: { id: "claude-sonnet-4-5-20250929", name: "Sonnet 4.5", emoji: "🧠" },
-        opus: { id: "claude-opus-4-5-20251101", name: "Opus 4.5", emoji: "🔮" },
-      };
-
-      const modelInfo = modelMap[modelChoice];
-      if (!modelInfo) {
+      // Resolve input against all provider models
+      const resolved = resolveModel(modelChoice);
+      if (!resolved) {
+        const models = getAllModels();
+        const list = models.length > 0
+          ? models.map(m => `\`${m.id}\` — ${m.name}`).join("\n")
+          : "_No models discovered yet. Try again in a moment._";
         await interaction.reply({
-          content: `❌ Unknown model: ${modelChoice}`,
+          content: `❌ Unknown model: \`${modelChoice}\`\n\n**Available models:**\n${list}`,
           ephemeral: true
         });
         break;
       }
 
-      state.model = modelInfo.id;
+      state.model = resolved.id;
 
-      // Update the session's provider model through WOPR context
+      // Update the session's provider model
       try {
         if (ctx.setSessionProvider) {
-          await ctx.setSessionProvider(sessionKey, "anthropic", { model: modelInfo.id });
+          await ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
         } else {
-          // Fallback: use CLI via child_process (runs inside container)
           const { exec } = await import("child_process");
           const { promisify } = await import("util");
           const execAsync = promisify(exec);
           await execAsync(
-            `node /app/dist/cli.js session set-provider ${sessionKey} anthropic --model ${modelInfo.id}`
+            `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`
           );
         }
 
         await interaction.reply({
-          content: `${modelInfo.emoji} **Model switched to:** ${modelInfo.name}\n\nAll future responses will use this model.`,
+          content: `🔄 **Model switched to:** ${resolved.name} (\`${resolved.id}\`)\n\nAll future responses will use this model.`,
           ephemeral: false
         });
       } catch (e) {
@@ -2051,10 +2149,26 @@ async function handleMessage(message: Message) {
 
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
 
+  // DEBUG: Log what Discord.js is giving us for author info
+  logger.info({
+    msg: "DEBUG author info",
+    channelId,
+    "message.author.id": message.author.id,
+    "message.author.username": message.author.username,
+    "message.author.displayName": (message.author as any).displayName,
+    "message.member?.displayName": message.member?.displayName,
+    "message.member?.nickname": message.member?.nickname,
+    "message.member?.user.username": message.member?.user?.username,
+    "resolved authorDisplayName": authorDisplayName,
+  });
+
+  // Resolve mentions in message content (@user -> @Username, #channel -> #channel-name)
+  const resolvedContent = resolveMentions(message);
+
   // Log ALL messages to WOPR conversation context
   const sessionKey = getSessionKey(message.channel as TextChannel | ThreadChannel | DMChannel);
   try {
-    ctx.logMessage(sessionKey, message.content, {
+    ctx.logMessage(sessionKey, resolvedContent, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (message.channel as any).name }
     });
@@ -2063,7 +2177,7 @@ async function handleMessage(message: Message) {
   // Add ALL messages to our buffer (for context building)
   addToBuffer(channelId, {
     from: authorDisplayName,
-    content: message.content,
+    content: resolvedContent,
     timestamp: Date.now(),
     isBot,
     isMention: isDirectlyMentioned,
@@ -2074,11 +2188,11 @@ async function handleMessage(message: Message) {
   if (isBot) {
     if (!isDirectlyMentioned) return; // Bots must @mention us
 
-    // Prepare message content
-    let messageContent = message.content;
-    const botMention = `<@${client.user.id}>`;
-    const botNicknameMention = `<@!${client.user.id}>`;
-    messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+    // Prepare message content (use resolved content with readable mentions)
+    let messageContent = resolvedContent;
+    // Remove bot's own @mention from the message
+    const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
+    messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
 
     if (!messageContent) return; // Ignore empty bot mentions
 
@@ -2128,11 +2242,12 @@ async function handleMessage(message: Message) {
     // Get accumulated context from buffer
     const bufferContext = getBufferContext(channelId);
 
-    let messageContent = message.content;
+    // Use resolved content with readable mentions
+    let messageContent = resolvedContent;
     if (client.user && isDirectlyMentioned) {
-      const botMention = `<@${client.user.id}>`;
-      const botNicknameMention = `<@!${client.user.id}>`;
-      messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+      // Remove bot's own @mention from the message
+      const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
+      messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
     }
 
     // Handle attachments - save to disk and append paths
@@ -2505,6 +2620,25 @@ const plugin: WOPRPlugin = {
 
     client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
     client.on(Events.InteractionCreate, async (interaction) => {
+      // Handle autocomplete for /model command
+      if (interaction.isAutocomplete()) {
+        if (interaction.commandName === "model") {
+          const focused = interaction.options.getFocused().toLowerCase();
+          const models = getAllModels();
+          const filtered = models
+            .filter(m =>
+              m.id.includes(focused) ||
+              m.name.toLowerCase().includes(focused) ||
+              focused === ""
+            )
+            .slice(0, 25); // Discord max 25 choices
+          await interaction.respond(
+            filtered.map(m => ({ name: `${m.name} (${m.id})`, value: m.id }))
+          );
+        }
+        return;
+      }
+
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
         await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
