@@ -60,6 +60,7 @@ import type {
   SessionCreateEvent,
   SessionInjectEvent,
   SessionResponseEvent,
+  SessionStreamEvent,
 } from "./types.js";
 
 const consoleFormat = winston.format.printf((info) => {
@@ -173,6 +174,36 @@ function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction):
   }
   // Fallback to channel ID if we can't resolve the channel type
   return `discord:${interaction.channelId}`;
+}
+
+/**
+ * Resolve Discord mentions in message content to readable names.
+ * Converts <@USER_ID> to @Username and <#CHANNEL_ID> to #channel-name
+ */
+function resolveMentions(message: Message): string {
+  let content = message.content;
+
+  // Resolve user mentions: <@USER_ID> or <@!USER_ID> -> @Username [USER_ID]
+  // Include both display name for readability AND ID for when WOPR needs to mention back
+  for (const [userId, user] of message.mentions.users) {
+    const member = message.guild?.members.cache.get(userId);
+    const displayName = member?.displayName || user.displayName || user.username;
+    // Replace both <@ID> and <@!ID> formats with @Name [ID]
+    content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `@${displayName} [${userId}]`);
+  }
+
+  // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
+  for (const [channelId, channel] of message.mentions.channels) {
+    const channelName = (channel as any).name || channelId;
+    content = content.replace(new RegExp(`<#${channelId}>`, 'g'), `#${channelName} [${channelId}]`);
+  }
+
+  // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
+  for (const [roleId, role] of message.mentions.roles) {
+    content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), `@${role.name} [${roleId}]`);
+  }
+
+  return content;
 }
 
 /**
@@ -301,15 +332,86 @@ const commands = [
     .setDescription("Switch the AI model for this session")
     .addStringOption(option =>
       option.setName("model")
-        .setDescription("AI model to use")
+        .setDescription("Model name or ID (e.g. opus, haiku, gpt-5.2)")
         .setRequired(true)
-        .addChoices(
-          { name: "⚡ Haiku 4.5 (Fast)", value: "haiku" },
-          { name: "🧠 Sonnet 4.5 (Balanced)", value: "sonnet" },
-          { name: "🔮 Opus 4.5 (Most Capable)", value: "opus" }
-        )
+        .setAutocomplete(true)
     ),
 ];
+
+// Get all available models from all registered providers
+// Returns { providerId, modelId, displayName } for each model
+interface ResolvedModel {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+function getAllModels(): ResolvedModel[] {
+  const results: ResolvedModel[] = [];
+  // Get all registered providers via the plugin context
+  const providers = (ctx as any)?.getChannelProviders?.() || [];
+  // Direct approach: iterate known provider IDs from the registry
+  const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
+  for (const pid of providerIds) {
+    const provider = (ctx as any)?.getProvider?.(pid);
+    if (!provider?.supportedModels) continue;
+    for (const modelId of provider.supportedModels) {
+      results.push({
+        provider: pid,
+        id: modelId,
+        name: modelIdToDisplayName(modelId),
+      });
+    }
+  }
+  return results;
+}
+
+// Convert a model ID to a human-readable display name
+// "claude-opus-4-6" -> "Opus 4.6"
+// "claude-sonnet-4-5-20250929" -> "Sonnet 4.5"
+// "gpt-5.2" -> "GPT 5.2"
+// Unknown -> return as-is
+function modelIdToDisplayName(id: string): string {
+  // Claude models: claude-{tier}-{version}[-snapshot]
+  const claude = id.match(/^claude-(\w+)-(\d[\d.-]*)(?:-\d{8})?$/);
+  if (claude) {
+    const tier = claude[1].charAt(0).toUpperCase() + claude[1].slice(1);
+    const ver = claude[2].replace(/-/g, ".");
+    return `${tier} ${ver}`;
+  }
+  // GPT models
+  const gpt = id.match(/^gpt-(.+)$/i);
+  if (gpt) return `GPT ${gpt[1]}`;
+  // o-series (o1, o3, etc.)
+  const o = id.match(/^o(\d.*)$/);
+  if (o) return `o${o[1]}`;
+  return id;
+}
+
+// Resolve user input to a model - supports:
+// - Exact model ID: "claude-opus-4-6"
+// - Shortcut name: "opus", "haiku", "sonnet", "gpt"
+// - Partial match: "4.6", "codex"
+function resolveModel(input: string): { provider: string; id: string; name: string } | null {
+  const models = getAllModels();
+  if (models.length === 0) return null;
+
+  const q = input.toLowerCase().trim();
+
+  // Exact ID match
+  const exact = models.find(m => m.id === q);
+  if (exact) return exact;
+
+  // Substring match on model ID
+  const partial = models.find(m => m.id.includes(q));
+  if (partial) return partial;
+
+  // Substring match on display name
+  const byName = models.find(m => m.name.toLowerCase().includes(q));
+  if (byName) return byName;
+
+  return null;
+}
 
 // Cache identity on init
 async function refreshIdentity() {
@@ -507,8 +609,10 @@ function tickTyping(channelId: string): void {
 
 /**
  * Stop showing typing indicator in a channel.
+ * Optionally pass the channel to force-clear Discord's typing state
+ * (Discord has no "stop typing" API — the only way is to send and delete a message).
  */
-function stopTyping(channelId: string): void {
+function stopTyping(channelId: string, channel?: TextChannel | ThreadChannel | DMChannel): void {
   const state = typingStates.get(channelId);
   if (state) {
     state.active = false;
@@ -518,6 +622,11 @@ function stopTyping(channelId: string): void {
     }
     typingStates.delete(channelId);
     logger.debug({ msg: "Typing indicator stopped", channelId });
+  }
+
+  // Force-clear typing by sending and immediately deleting an invisible message
+  if (channel) {
+    channel.send("\u200b").then((m: any) => m.delete().catch(() => {})).catch(() => {});
   }
 }
 
@@ -1061,9 +1170,8 @@ async function handleRegisteredParsers(message: Message): Promise<boolean> {
 
 // Discord streaming message handler with explicit state machine
 const DISCORD_LIMIT = 2000;
-const EDIT_THRESHOLD = 800;
-const IDLE_SPLIT_MS = 1000;
-const FLUSH_DEBOUNCE_MS = 300;
+const EDIT_INTERVAL_MS = 1000; // Max 1 edit per second (Discord rate limit: 5 req/5s per channel)
+const IDLE_SPLIT_MS = 3500;
 
 // Explicit state machine - each state is mutually exclusive
 type MessageState =
@@ -1082,6 +1190,7 @@ class DiscordMessageUnit {
   private readonly replyTo: Message;
   private readonly isReply: boolean;
   private readonly unitId: string;
+  private _overflow: string = "";  // Content that didn't fit after a split
 
   constructor(
     channel: TextChannel | ThreadChannel | DMChannel,
@@ -1151,20 +1260,15 @@ class DiscordMessageUnit {
       return this.handleOverflow(content);
     }
 
-    // In buffering state - check if we have enough to send initial message
+    // In buffering state - send initial message (any content is enough)
     if (this.state.status === 'buffering') {
-      if (content.length < EDIT_THRESHOLD) {
-        logger.debug({ msg: "Unit.flush skip - below threshold", unitId: this.unitId, contentLen: content.length, threshold: EDIT_THRESHOLD });
-        return 'skip';
-      }
       return this.sendInitial(content);
     }
 
-    // In sent state - check if we have enough new content to edit
+    // In sent state - edit with new content
     if (this.state.status === 'sent') {
-      const newChars = content.length - this.state.lastEditLength;
-      if (newChars < EDIT_THRESHOLD) {
-        logger.debug({ msg: "Unit.flush skip - not enough new chars", unitId: this.unitId, newChars, threshold: EDIT_THRESHOLD });
+      if (content.length === this.state.lastEditLength) {
+        logger.debug({ msg: "Unit.flush skip - no new content", unitId: this.unitId });
         return 'skip';
       }
       return this.editExisting(content);
@@ -1209,9 +1313,17 @@ class DiscordMessageUnit {
   }
 
   private async handleOverflow(content: string): Promise<'ok' | 'split' | 'skip'> {
-    const toSend = content.slice(0, DISCORD_LIMIT);
-    const overflow = content.slice(DISCORD_LIMIT);
-    logger.debug({ msg: "Unit.handleOverflow", unitId: this.unitId, toSendLen: toSend.length, overflowLen: overflow.length });
+    // Find a word boundary to split at (don't cut mid-word)
+    let splitAt = DISCORD_LIMIT;
+    const lastSpace = content.lastIndexOf(' ', DISCORD_LIMIT);
+    const lastNewline = content.lastIndexOf('\n', DISCORD_LIMIT);
+    const bestBreak = Math.max(lastSpace, lastNewline);
+    if (bestBreak > DISCORD_LIMIT * 0.75) {
+      splitAt = bestBreak;
+    }
+    const toSend = content.slice(0, splitAt);
+    const overflow = content.slice(splitAt).trimStart();
+    logger.debug({ msg: "Unit.handleOverflow", unitId: this.unitId, toSendLen: toSend.length, overflowLen: overflow.length, splitAt });
 
     if (this.state.status === 'buffering') {
       // Send initial with truncated content
@@ -1236,8 +1348,14 @@ class DiscordMessageUnit {
       logger.debug({ msg: "Unit.handleOverflow edited and finalized", unitId: this.unitId });
     }
 
-    // Signal that we have overflow content for a new message
+    // Store overflow so the stream can retrieve it
+    this._overflow = overflow;
     return 'split';
+  }
+
+  /** Get the overflow content from the last split. */
+  get overflow(): string {
+    return this._overflow;
   }
 
   /**
@@ -1296,12 +1414,6 @@ class DiscordMessageUnit {
     }
   }
 
-  /**
-   * Get overflow content after a split (content that exceeded DISCORD_LIMIT)
-   */
-  getOverflow(originalContent: string): string {
-    return originalContent.slice(DISCORD_LIMIT);
-  }
 }
 
 /**
@@ -1327,6 +1439,16 @@ class DiscordMessageStream {
     this.streamId = Math.random().toString(36).slice(2, 8);
     this.currentUnit = new DiscordMessageUnit(channel, replyTo, true); // First message is reply
     logger.info({ msg: "Stream created", streamId: this.streamId, channelId: channel.id });
+
+    // Start the 1-second flush interval — matches Discord's rate limit (5 req/5s per channel)
+    this.flushTimer = setInterval(() => this.processPending(), EDIT_INTERVAL_MS);
+  }
+
+  /** Re-send typing indicator after each edit (edits clear the typing state in Discord) */
+  private async refreshTyping(): Promise<void> {
+    try {
+      await this.channel.sendTyping();
+    } catch (_) { /* channel gone, ignore */ }
   }
 
   /**
@@ -1338,85 +1460,47 @@ class DiscordMessageStream {
       return;
     }
     this.pendingContent.push(text);
-    const totalPending = this.pendingContent.reduce((sum, t) => sum + t.length, 0);
-    const currentUnitLen = this.currentUnit.content.length;
-    const totalContent = totalPending + currentUnitLen;
-
-    logger.debug({ msg: "Stream.append", streamId: this.streamId, textLen: text.length, totalContent, pendingCount: this.pendingContent.length });
-
-    // If we have enough content to send, process immediately
-    if (totalContent >= EDIT_THRESHOLD) {
-      logger.debug({ msg: "Stream.append - threshold reached, processing immediately", streamId: this.streamId, totalContent, threshold: EDIT_THRESHOLD });
-      this.scheduleProcessing(true); // immediate
-    } else {
-      this.scheduleProcessing(false); // debounced
-    }
-  }
-
-  private scheduleProcessing(immediate: boolean = false): void {
-    if (this.processing) {
-      logger.debug({ msg: "Stream.scheduleProcessing - already processing", streamId: this.streamId });
-      return;
-    }
-
-    // Clear any existing timer
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
-
-    if (immediate) {
-      // Process on next tick to allow current call stack to complete
-      logger.debug({ msg: "Stream.scheduleProcessing - immediate", streamId: this.streamId });
-      setImmediate(() => this.processPending());
-    } else {
-      // Debounce flush to batch rapid chunks when below threshold
-      logger.debug({ msg: "Stream.scheduleProcessing - debounced", streamId: this.streamId, debounceMs: FLUSH_DEBOUNCE_MS });
-      this.flushTimer = setTimeout(() => this.processPending(), FLUSH_DEBOUNCE_MS);
-    }
+    logger.debug({ msg: "Stream.append", streamId: this.streamId, textLen: text.length, pendingCount: this.pendingContent.length });
   }
 
   private async processPending(): Promise<void> {
-    if (this.processing || this.finalized) {
-      logger.debug({ msg: "Stream.processPending skip", streamId: this.streamId, processing: this.processing, finalized: this.finalized });
+    if (this.processing || this.finalized || this.pendingContent.length === 0) {
       return;
     }
     this.processing = true;
-    logger.debug({ msg: "Stream.processPending start", streamId: this.streamId, pendingCount: this.pendingContent.length });
 
     try {
-      while (this.pendingContent.length > 0) {
-        const text = this.pendingContent.shift()!;
-        await this.processText(text);
+      // Drain all pending chunks into one batch, then flush ONCE
+      const batch = this.pendingContent.splice(0, this.pendingContent.length).join("");
+      if (!batch) return;
+
+      const now = Date.now();
+      const timeSinceLast = now - this.lastAppendTime;
+      this.lastAppendTime = now;
+
+      // Idle split: long pause with existing content → start new message
+      if (timeSinceLast > IDLE_SPLIT_MS && this.currentUnit.content.length > 0) {
+        logger.info({ msg: "Stream idle split", streamId: this.streamId, timeSinceLast, unitContent: this.currentUnit.content.length });
+        await this.currentUnit.finalize();
+        this.completedUnits.push(this.currentUnit);
+        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
       }
-      logger.debug({ msg: "Stream.processPending complete", streamId: this.streamId });
+
+      // Append entire batch at once, then flush once
+      this.currentUnit.append(batch);
+      await this.flushWithOverflowHandling();
+
+      // Re-send typing indicator — Discord clears it when we send/edit a message
+      if (!this.finalized) {
+        await this.refreshTyping();
+      }
+
+      logger.debug({ msg: "Stream.processPending complete", streamId: this.streamId, batchLen: batch.length });
     } catch (error) {
       logger.error({ msg: "Stream processing error", streamId: this.streamId, error: String(error) });
     } finally {
       this.processing = false;
     }
-  }
-
-  private async processText(text: string): Promise<void> {
-    const now = Date.now();
-    const timeSinceLast = now - this.lastAppendTime;
-    this.lastAppendTime = now;
-
-    logger.debug({ msg: "Stream.processText", streamId: this.streamId, textLen: text.length, timeSinceLast });
-
-    // Idle split: long pause with existing content → start new message
-    if (timeSinceLast > IDLE_SPLIT_MS && this.currentUnit.content.length > 0) {
-      logger.info({ msg: "Stream idle split", streamId: this.streamId, timeSinceLast, unitContent: this.currentUnit.content.length });
-      await this.currentUnit.finalize();
-      this.completedUnits.push(this.currentUnit);
-      this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
-    }
-
-    // Add content to current unit
-    this.currentUnit.append(text);
-
-    // Handle content that exceeds Discord limit - may need multiple messages
-    await this.flushWithOverflowHandling();
   }
 
   /**
@@ -1429,8 +1513,8 @@ class DiscordMessageStream {
       logger.debug({ msg: "Stream.flushWithOverflowHandling result", streamId: this.streamId, result, contentLen: currentContent.length });
 
       if (result === 'split') {
-        // Unit sent first 2000 chars and finalized - extract overflow for new unit
-        const overflow = currentContent.slice(DISCORD_LIMIT);
+        // Unit split at a word boundary and finalized - get the overflow it stored
+        const overflow = this.currentUnit.overflow;
         logger.info({ msg: "Stream overflow split", streamId: this.streamId, overflowLen: overflow.length });
         this.completedUnits.push(this.currentUnit);
         this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
@@ -1459,11 +1543,11 @@ class DiscordMessageStream {
       return;
     }
 
-    // Cancel any pending flush timer (we'll process everything now)
+    // Stop the flush interval (we'll process everything now)
     if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
+      clearInterval(this.flushTimer);
       this.flushTimer = null;
-      logger.debug({ msg: "Stream.finalize cancelled pending flush timer", streamId: this.streamId });
+      logger.debug({ msg: "Stream.finalize stopped flush interval", streamId: this.streamId });
     }
 
     // Wait for any ongoing processing to complete
@@ -1484,16 +1568,15 @@ class DiscordMessageStream {
 
     this.finalized = true;
 
-    // Process any remaining pending content
+    // Process any remaining pending content — batch into one append + flush
     const remainingCount = this.pendingContent.length;
     if (remainingCount > 0) {
-      logger.debug({ msg: "Stream.finalize processing remaining content", streamId: this.streamId, remainingCount });
-      while (this.pendingContent.length > 0) {
-        const text = this.pendingContent.shift()!;
-        this.currentUnit.append(text);
+      const remaining = this.pendingContent.splice(0, this.pendingContent.length).join("");
+      logger.debug({ msg: "Stream.finalize processing remaining content", streamId: this.streamId, remainingCount, remainingLen: remaining.length });
+      if (remaining) {
+        this.currentUnit.append(remaining);
+        await this.flushWithOverflowHandling();
       }
-      // Flush with overflow handling for any accumulated content
-      await this.flushWithOverflowHandling();
     }
 
     // Finalize current unit
@@ -1515,6 +1598,11 @@ class DiscordMessageStream {
 // Stream registry - one stream per MESSAGE (not session) to prevent race conditions
 // Key: Discord message ID that triggered the inject
 const streams = new Map<string, DiscordMessageStream>();
+
+// Event bus streams - for non-Discord-originated injects (cron, sessions_send, P2P, CLI)
+// Key: session name (e.g., "discord:misfits:#wopr-devops")
+// These stream responses through the same collapser as normal Discord messages
+const eventBusStreams = new Map<string, DiscordMessageStream>();
 
 /**
  * Handle an incoming stream chunk.
@@ -1840,40 +1928,37 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
     case "model": {
       const modelChoice = interaction.options.getString("model", true);
 
-      // Resolve simple names to model IDs (fetched from config or use latest)
-      const modelMap: Record<string, { id: string; name: string; emoji: string }> = {
-        haiku: { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5", emoji: "⚡" },
-        sonnet: { id: "claude-sonnet-4-5-20250929", name: "Sonnet 4.5", emoji: "🧠" },
-        opus: { id: "claude-opus-4-5-20251101", name: "Opus 4.5", emoji: "🔮" },
-      };
-
-      const modelInfo = modelMap[modelChoice];
-      if (!modelInfo) {
+      // Resolve input against all provider models
+      const resolved = resolveModel(modelChoice);
+      if (!resolved) {
+        const models = getAllModels();
+        const list = models.length > 0
+          ? models.map(m => `\`${m.id}\` — ${m.name}`).join("\n")
+          : "_No models discovered yet. Try again in a moment._";
         await interaction.reply({
-          content: `❌ Unknown model: ${modelChoice}`,
+          content: `❌ Unknown model: \`${modelChoice}\`\n\n**Available models:**\n${list}`,
           ephemeral: true
         });
         break;
       }
 
-      state.model = modelInfo.id;
+      state.model = resolved.id;
 
-      // Update the session's provider model through WOPR context
+      // Update the session's provider model
       try {
         if (ctx.setSessionProvider) {
-          await ctx.setSessionProvider(sessionKey, "anthropic", { model: modelInfo.id });
+          await ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
         } else {
-          // Fallback: use CLI via child_process (runs inside container)
           const { exec } = await import("child_process");
           const { promisify } = await import("util");
           const execAsync = promisify(exec);
           await execAsync(
-            `node /app/dist/cli.js session set-provider ${sessionKey} anthropic --model ${modelInfo.id}`
+            `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`
           );
         }
 
         await interaction.reply({
-          content: `${modelInfo.emoji} **Model switched to:** ${modelInfo.name}\n\nAll future responses will use this model.`,
+          content: `🔄 **Model switched to:** ${resolved.name} (\`${resolved.id}\`)\n\nAll future responses will use this model.`,
           ephemeral: false
         });
       } catch (e) {
@@ -1990,11 +2075,6 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
         // Collect response for editing
         if (msg.type === "text" && msg.content) {
           responseBuffer += msg.content;
-          // Edit reply when we have enough new content (debounce edits)
-          if (responseBuffer.length - lastEditLength >= EDIT_THRESHOLD) {
-            lastEditLength = responseBuffer.length;
-            interaction.editReply(responseBuffer.slice(0, DISCORD_LIMIT)).catch(() => {});
-          }
         }
       }
     });
@@ -2051,10 +2131,26 @@ async function handleMessage(message: Message) {
 
   const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
 
+  // DEBUG: Log what Discord.js is giving us for author info
+  logger.info({
+    msg: "DEBUG author info",
+    channelId,
+    "message.author.id": message.author.id,
+    "message.author.username": message.author.username,
+    "message.author.displayName": (message.author as any).displayName,
+    "message.member?.displayName": message.member?.displayName,
+    "message.member?.nickname": message.member?.nickname,
+    "message.member?.user.username": message.member?.user?.username,
+    "resolved authorDisplayName": authorDisplayName,
+  });
+
+  // Resolve mentions in message content (@user -> @Username, #channel -> #channel-name)
+  const resolvedContent = resolveMentions(message);
+
   // Log ALL messages to WOPR conversation context
   const sessionKey = getSessionKey(message.channel as TextChannel | ThreadChannel | DMChannel);
   try {
-    ctx.logMessage(sessionKey, message.content, {
+    ctx.logMessage(sessionKey, resolvedContent, {
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (message.channel as any).name }
     });
@@ -2063,7 +2159,7 @@ async function handleMessage(message: Message) {
   // Add ALL messages to our buffer (for context building)
   addToBuffer(channelId, {
     from: authorDisplayName,
-    content: message.content,
+    content: resolvedContent,
     timestamp: Date.now(),
     isBot,
     isMention: isDirectlyMentioned,
@@ -2074,39 +2170,17 @@ async function handleMessage(message: Message) {
   if (isBot) {
     if (!isDirectlyMentioned) return; // Bots must @mention us
 
-    // Prepare message content
-    let messageContent = message.content;
-    const botMention = `<@${client.user.id}>`;
-    const botNicknameMention = `<@!${client.user.id}>`;
-    messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+    // Prepare message content (use resolved content with readable mentions)
+    let messageContent = resolvedContent;
+    // Remove bot's own @mention from the message
+    const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
+    messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
 
     if (!messageContent) return; // Ignore empty bot mentions
 
     // Get accumulated context from buffer
     const bufferContext = getBufferContext(channelId);
     const fullMessage = bufferContext + messageContent;
-
-    // V2 Session API: If there's an active streaming session, inject directly
-    if (ctx.hasActiveSession && ctx.injectIntoActiveSession && (await ctx.hasActiveSession(sessionKey))) {
-      logger.info({ msg: "Bot @mention - injecting into active V2 session", channelId, sessionKey, botId: message.author.id });
-
-      await setMessageReaction(message, REACTION_ACTIVE);
-
-      try {
-        await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
-          from: authorDisplayName,
-          channel: { type: "discord", id: channelId, name: (message.channel as any).name }
-        });
-        // Mark as DONE - the response will flow through the existing session's stream
-        // Using a distinct emoji would be better UX but DONE is acceptable
-        await setMessageReaction(message, REACTION_DONE);
-        clearBuffer(channelId);  // Clear buffer after successful V2 injection
-        return;  // Success - don't fall through to queue
-      } catch (error) {
-        logger.error({ msg: "V2 inject failed for bot, falling back to queue", error: String(error) });
-        // Fall through to queue below
-      }
-    }
 
     // Queue the bot response (will fire after cooldown + human typing check)
     queueInject(channelId, {
@@ -2128,11 +2202,12 @@ async function handleMessage(message: Message) {
     // Get accumulated context from buffer
     const bufferContext = getBufferContext(channelId);
 
-    let messageContent = message.content;
+    // Use resolved content with readable mentions
+    let messageContent = resolvedContent;
     if (client.user && isDirectlyMentioned) {
-      const botMention = `<@${client.user.id}>`;
-      const botNicknameMention = `<@!${client.user.id}>`;
-      messageContent = messageContent.replace(botNicknameMention, "").replace(botMention, "").trim();
+      // Remove bot's own @mention from the message
+      const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
+      messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
     }
 
     // Handle attachments - save to disk and append paths
@@ -2153,29 +2228,6 @@ async function handleMessage(message: Message) {
 
     // Prepend buffer context
     const fullMessage = bufferContext + messageContent;
-
-    // V2 Session API: If there's an active streaming session, inject directly
-    // instead of queuing (message gets sent to Claude immediately via session.send())
-    if (ctx.hasActiveSession && ctx.injectIntoActiveSession && (await ctx.hasActiveSession(sessionKey))) {
-      logger.info({ msg: "Human @mention - injecting into active V2 session", channelId, sessionKey });
-
-      // Add a reaction to show we received the message
-      await setMessageReaction(message, REACTION_ACTIVE);
-
-      try {
-        await ctx.injectIntoActiveSession(sessionKey, fullMessage, {
-          from: authorDisplayName,
-          channel: { type: "discord", id: channelId, name: (message.channel as any).name }
-        });
-        // Mark as DONE - the response will flow through the existing session's stream
-        await setMessageReaction(message, REACTION_DONE);
-        clearBuffer(channelId);  // Clear buffer after successful V2 injection
-        return;  // Success - don't fall through to queue
-      } catch (error) {
-        logger.error({ msg: "V2 inject failed, falling back to queue", error: String(error) });
-        // Fall through to queue below
-      }
-    }
 
     logger.info({ msg: "Human @mention - queueing (priority)", channelId, hasContext: bufferContext.length > 0 });
 
@@ -2254,9 +2306,6 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       // Skip conversation_history and channel_history - Discord handles its own context buffer
       contextProviders: ['session_system', 'skills', 'bootstrap_files'],
-      // Discord handles V2 injection itself before this point - don't let core try V2
-      // which would route responses to the wrong stream
-      allowV2Inject: false,
       onStream: (msg: StreamMessage) => {
         // Check cancellation during streaming
         if (cancelToken.cancelled) return;
@@ -2272,8 +2321,8 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
     await stream.finalize();
     streams.delete(streamKey);
 
-    // Stop typing indicator
-    stopTyping(channelId);
+    // Stop typing indicator (pass channel to force-clear Discord's typing state)
+    stopTyping(channelId, channel);
 
     // Transition to done (✅)
     await setMessageReaction(replyToMessage, REACTION_DONE);
@@ -2285,8 +2334,8 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
     const errorStr = String(error);
     const isCancelled = cancelToken.cancelled || errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
 
-    // Stop typing indicator on any error
-    stopTyping(channelId);
+    // Stop typing indicator (pass channel to force-clear Discord's typing state)
+    stopTyping(channelId, channel);
 
     if (isCancelled) {
       logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey, streamKey });
@@ -2401,21 +2450,18 @@ const plugin: WOPRPlugin = {
 
     // Subscribe to session events to deliver ALL session activity to Discord
     // This includes: crons, sessions_send, P2P injects, CLI injects, etc.
+    // Uses the same streaming collapser as normal Discord messages via the event bus.
     logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
     if (ctx.events) {
-      // Deliver incoming messages to Discord (for visibility into what's being injected)
+      // On inject start: send notification to Discord and create a stream for the response
       ctx.events.on("session:beforeInject", async (payload: SessionInjectEvent) => {
-        // Only handle Discord sessions
         if (!payload.session.startsWith("discord:")) return;
         if (!payload.message) return;
-
-        // Skip messages that originated from Discord (already visible in channel)
-        // Check channel.type, not from (from is the username, not the channel type)
         if (payload.channel?.type === "discord") return;
+        if (!client) return;
 
-        logger.info({ msg: "Session inject for Discord", session: payload.session, from: payload.from });
+        logger.info({ msg: "Session inject for Discord (streaming)", session: payload.session, from: payload.from });
 
-        // Find the channel ID from conversation log
         const channelId = findChannelIdFromConversationLog(payload.session);
         if (!channelId) {
           logger.warn({ msg: "Could not find Discord channel ID for inject", session: payload.session });
@@ -2429,48 +2475,124 @@ const plugin: WOPRPlugin = {
         } else if (payload.from === "cli") {
           sourceLabel = "CLI";
         } else if (payload.from?.startsWith("p2p:")) {
-          sourceLabel = `P2P`;
+          sourceLabel = "P2P";
         } else if (payload.from?.startsWith("discord:")) {
           sourceLabel = `Session: ${payload.from}`;
         }
 
-        // Deliver the message to Discord (formatted with source label)
         try {
-          await discordChannelProvider.send(channelId, `**[${sourceLabel}]** ${payload.message}`);
-          logger.info({ msg: "Delivered inject message to Discord", session: payload.session, channelId, from: payload.from });
+          // Send the notification message directly to get the Message object back
+          const channel = await client.channels.fetch(channelId);
+          if (!channel || !channel.isTextBased() || !('send' in channel)) {
+            logger.warn({ msg: "Channel not sendable for streaming", session: payload.session, channelId });
+            return;
+          }
+          const notificationMsg = await (channel as TextChannel | ThreadChannel | DMChannel).send(
+            `**[${sourceLabel}]** ${payload.message.slice(0, 1900)}`
+          );
+          logger.info({ msg: "Sent inject notification, creating stream", session: payload.session, channelId, msgId: notificationMsg.id });
+
+          // Clean up any stale stream for this session
+          const existing = eventBusStreams.get(payload.session);
+          if (existing) {
+            await existing.finalize().catch(() => {});
+            eventBusStreams.delete(payload.session);
+          }
+
+          // Create a streaming collapser that replies to the notification message
+          const stream = new DiscordMessageStream(
+            channel as TextChannel | ThreadChannel | DMChannel,
+            notificationMsg
+          );
+          eventBusStreams.set(payload.session, stream);
         } catch (err) {
-          logger.error({ msg: "Failed to deliver inject message to Discord", session: payload.session, channelId, error: String(err) });
+          logger.error({ msg: "Failed to set up streaming for inject", session: payload.session, channelId, error: String(err) });
         }
       });
 
-      // Deliver AI responses to Discord
+      // On inject complete: safety net for stream finalization
+      // Primary finalization happens on the "complete" stream event (immediate).
+      // This handler catches edge cases where the stream event was missed.
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
-        // Only handle Discord sessions
         if (!payload.session.startsWith("discord:")) return;
-        if (!payload.response) return;
-
-        // Skip responses to Discord-originated messages (already handled by normal message flow)
-        // Check channel.type, not from (from is the username, not the channel type)
         if ((payload as any).channel?.type === "discord") return;
 
-        logger.info({ msg: "Session response for Discord", session: payload.session, from: payload.from });
+        const stream = eventBusStreams.get(payload.session);
+        if (stream) {
+          // Stream still in map — wasn't finalized by the complete event (edge case)
+          logger.warn({ msg: "afterInject safety net: finalizing stream that missed complete event", session: payload.session, from: payload.from });
+          await stream.finalize().catch((err) => {
+            logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
+          });
+          eventBusStreams.delete(payload.session);
+        } else if (payload.response) {
+          // No stream was created (e.g., channel not found) — fall back to bulk send
+          logger.info({ msg: "No stream, falling back to bulk send", session: payload.session, from: payload.from });
+          const channelId = findChannelIdFromConversationLog(payload.session);
+          if (channelId) {
+            try {
+              await discordChannelProvider.send(channelId, payload.response);
+            } catch (err) {
+              logger.error({ msg: "Failed to deliver response to Discord", session: payload.session, error: String(err) });
+            }
+          }
+        }
+      });
+      logger.info("Subscribed to session events for Discord delivery (streaming)");
+    }
 
-        // Find the channel ID from conversation log
-        const channelId = findChannelIdFromConversationLog(payload.session);
-        if (!channelId) {
-          logger.warn({ msg: "Could not find Discord channel ID for response", session: payload.session });
+    // Subscribe to stream events on the plugin event bus
+    // This routes streaming tokens from ALL injects (including sessions_send, cron, CLI)
+    // through the same Discord collapser used for normal messages
+    if (ctx.on) {
+      ctx.on("stream", (event: SessionStreamEvent) => {
+        const stream = eventBusStreams.get(event.session);
+        if (!stream) return;
+
+        const msg = event.message;
+
+        // Handle completion/error — finalize immediately (don't wait for afterInject
+        // which is delayed by other handlers like semantic memory embeddings)
+        if (msg.type === "complete" || msg.type === "error") {
+          logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
+          eventBusStreams.delete(event.session);
+          stream.finalize().catch((err) => {
+            logger.error({ msg: "Failed to finalize event bus stream on complete", session: event.session, error: String(err) });
+          });
           return;
         }
 
-        // Deliver the response to Discord
-        try {
-          await discordChannelProvider.send(channelId, payload.response);
-          logger.info({ msg: "Delivered response to Discord", session: payload.session, channelId, from: payload.from });
-        } catch (err) {
-          logger.error({ msg: "Failed to deliver response to Discord", session: payload.session, channelId, error: String(err) });
+        // Handle auto-compaction notifications
+        if (msg.type === "system" && msg.subtype === "compact_boundary") {
+          const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+          if (metadata?.trigger === "auto") {
+            let notification = "📦 **Auto-Compaction**\n";
+            notification += metadata.pre_tokens
+              ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
+              : "Context has been automatically compressed";
+            stream.append(`\n\n${notification}\n\n`);
+          }
+          return;
+        }
+
+        // Extract text content
+        let textContent = "";
+        if (msg.type === "text" && msg.content) {
+          textContent = msg.content;
+        } else if (msg.type === "assistant" && (msg as any).message?.content) {
+          const content = (msg as any).message.content;
+          if (Array.isArray(content)) {
+            textContent = content.map((c: any) => c.text || "").join("");
+          } else if (typeof content === "string") {
+            textContent = content;
+          }
+        }
+
+        if (textContent) {
+          stream.append(textContent);
         }
       });
-      logger.info("Subscribed to session events for Discord delivery");
+      logger.info("Subscribed to stream events for Discord streaming");
     }
 
     await refreshIdentity();
@@ -2505,6 +2627,25 @@ const plugin: WOPRPlugin = {
 
     client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
     client.on(Events.InteractionCreate, async (interaction) => {
+      // Handle autocomplete for /model command
+      if (interaction.isAutocomplete()) {
+        if (interaction.commandName === "model") {
+          const focused = interaction.options.getFocused().toLowerCase();
+          const models = getAllModels();
+          const filtered = models
+            .filter(m =>
+              m.id.includes(focused) ||
+              m.name.toLowerCase().includes(focused) ||
+              focused === ""
+            )
+            .slice(0, 25); // Discord max 25 choices
+          await interaction.respond(
+            filtered.map(m => ({ name: `${m.name} (${m.id})`, value: m.id }))
+          );
+        }
+        return;
+      }
+
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
         await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
