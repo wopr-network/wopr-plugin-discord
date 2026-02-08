@@ -2510,15 +2510,17 @@ const plugin: WOPRPlugin = {
         }
       });
 
-      // On inject complete: finalize the stream
+      // On inject complete: safety net for stream finalization
+      // Primary finalization happens on the "complete" stream event (immediate).
+      // This handler catches edge cases where the stream event was missed.
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
         if (!payload.session.startsWith("discord:")) return;
         if ((payload as any).channel?.type === "discord") return;
 
         const stream = eventBusStreams.get(payload.session);
         if (stream) {
-          // Stream was active — finalize it (flush remaining content)
-          logger.info({ msg: "Finalizing event bus stream", session: payload.session, from: payload.from });
+          // Stream still in map — wasn't finalized by the complete event (edge case)
+          logger.warn({ msg: "afterInject safety net: finalizing stream that missed complete event", session: payload.session, from: payload.from });
           await stream.finalize().catch((err) => {
             logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
           });
@@ -2549,9 +2551,14 @@ const plugin: WOPRPlugin = {
 
         const msg = event.message;
 
-        // Handle completion/error — finalize handled by afterInject, just log here
+        // Handle completion/error — finalize immediately (don't wait for afterInject
+        // which is delayed by other handlers like semantic memory embeddings)
         if (msg.type === "complete" || msg.type === "error") {
-          logger.debug({ msg: "Event bus stream end", session: event.session, type: msg.type });
+          logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
+          eventBusStreams.delete(event.session);
+          stream.finalize().catch((err) => {
+            logger.error({ msg: "Failed to finalize event bus stream on complete", session: event.session, error: String(err) });
+          });
           return;
         }
 
