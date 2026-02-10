@@ -338,8 +338,7 @@ interface ResolvedModel {
 function getAllModels(): ResolvedModel[] {
   const results: ResolvedModel[] = [];
   // Get all registered providers via the plugin context
-  const _providers = (ctx as any)?.getChannelProviders?.() || [];
-  // Direct approach: iterate known provider IDs from the registry
+  // Iterate known provider IDs from the registry
   const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
   for (const pid of providerIds) {
     const provider = (ctx as any)?.getProvider?.(pid);
@@ -2012,13 +2011,11 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       if (result.success) {
         await interaction.reply({
           content:
-            `✅ **Ownership claimed!**\n\nYou are now the owner of this bot.\n\n` +
-            `**User ID:** ${result.userId}\n` +
-            `**Username:** ${result.username}\n\n` +
+            `✅ **Ownership claimed!**\n\n` +
             `You will receive private notifications for friend requests and other owner-only features.`,
-          ephemeral: false,
+          ephemeral: true,
         });
-        logger.info({ msg: "Bot ownership claimed", userId: result.userId, username: result.username });
+        logger.info({ msg: "Bot ownership claimed" });
       } else {
         await interaction.reply({
           content: `❌ **Claim failed:** ${result.error}\n\nMake sure you're using the correct code and it hasn't expired.`,
@@ -2199,23 +2196,12 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
     fullMessage = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
   }
 
-  // Note: Slash commands use direct interaction.editReply() - no stream needed
-  // For slash commands, we use a simple buffer since we edit the deferred reply
-  let _responseBuffer = "";
-  const _lastEditLength = 0;
-
   try {
     const response = await ctx.inject(sessionKey, fullMessage, {
       from: interaction.user.username,
       channel: { type: "discord", id: interaction.channelId, name: "slash-command" },
       // Skip conversation_history and channel_history - Discord handles its own context
       contextProviders: ["session_system", "skills", "bootstrap_files"],
-      onStream: (msg: StreamMessage) => {
-        // Collect response for editing
-        if (msg.type === "text" && msg.content) {
-          _responseBuffer += msg.content;
-        }
-      },
     });
 
     // Final edit with complete response
@@ -2270,18 +2256,6 @@ async function handleMessage(message: Message) {
   const authorDisplayName =
     message.member?.displayName || (message.author as any).displayName || message.author.username;
 
-  // DEBUG: Log what Discord.js is giving us for author info
-  logger.info({
-    msg: "DEBUG author info",
-    channelId,
-    "message.author.id": message.author.id,
-    "message.author.username": message.author.username,
-    "message.author.displayName": (message.author as any).displayName,
-    "message.member?.displayName": message.member?.displayName,
-    "message.member?.nickname": message.member?.nickname,
-    "message.member?.user.username": message.member?.user?.username,
-    "resolved authorDisplayName": authorDisplayName,
-  });
 
   // Resolve mentions in message content (@user -> @Username, #channel -> #channel-name)
   const resolvedContent = resolveMentions(message);
@@ -2856,12 +2830,15 @@ const plugin: WOPRPlugin = {
               return `Accepted friend request from @${from} (but P2P extension not available)`;
             }
           },
-          // onDeny handler
+          // onDeny handler - `pending` is fetched inside handleFriendButtonInteraction before removal
           async (from: string) => {
             if (p2pExt?.denyFriendRequest) {
-              // Get pending request to find signature
               const pending = getPendingButtonRequest(from);
-              await p2pExt.denyFriendRequest(from, pending?.signature || "");
+              if (pending?.signature) {
+                await p2pExt.denyFriendRequest(from, pending.signature);
+              } else {
+                logger.warn({ msg: "No signature found for deny - skipping P2P deny call", from });
+              }
             }
             logger.info({ msg: "Friend request denied via button", from });
           },

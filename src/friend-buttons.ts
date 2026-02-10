@@ -138,6 +138,9 @@ export async function handleFriendButtonInteraction(
     return;
   }
 
+  // Defer immediately to avoid Discord's 3-second interaction timeout
+  await interaction.deferUpdate();
+
   if (parsed.action === "accept") {
     try {
       const acceptMessage = await onAccept(parsed.from, pending);
@@ -145,8 +148,8 @@ export async function handleFriendButtonInteraction(
       // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Update the original message to show it was accepted
-      await interaction.update({
+      // Edit the deferred message to show it was accepted
+      await interaction.editReply({
         content: `Friend request from @${parsed.from} **accepted**.`,
         embeds: [],
         components: [],
@@ -160,7 +163,7 @@ export async function handleFriendButtonInteraction(
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} accepted via button`);
     } catch (err) {
-      await interaction.reply({
+      await interaction.followUp({
         content: `Failed to accept friend request: ${err}`,
         ephemeral: true,
       });
@@ -172,8 +175,8 @@ export async function handleFriendButtonInteraction(
       // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Update the original message to show it was denied
-      await interaction.update({
+      // Edit the deferred message to show it was denied
+      await interaction.editReply({
         content: `Friend request from @${parsed.from} **denied**.`,
         embeds: [],
         components: [],
@@ -181,7 +184,7 @@ export async function handleFriendButtonInteraction(
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} denied via button`);
     } catch (err) {
-      await interaction.reply({
+      await interaction.followUp({
         content: `Failed to deny friend request: ${err}`,
         ephemeral: true,
       });

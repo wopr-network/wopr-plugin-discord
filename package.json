@@ -12,7 +12,7 @@
     "lint": "biome check src/",
     "lint:fix": "biome check --fix src/",
     "format": "biome format --write src/",
-    "check": "biome check --fix src/ && tsc --noEmit"
+    "check": "biome check src/ && tsc --noEmit"
   },
   "keywords": [
     "wopr",
