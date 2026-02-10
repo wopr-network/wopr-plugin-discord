@@ -5,27 +5,19 @@
  * Only visible to the bot owner via ephemeral messages.
  */
 
-import {
-  ButtonBuilder,
-  ButtonStyle,
-  ActionRowBuilder,
-  Message,
-  TextChannel,
-  EmbedBuilder,
-  ButtonInteraction,
-} from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, type ButtonInteraction, ButtonStyle, EmbedBuilder } from "discord.js";
 import type { WOPRPluginContext } from "./types.js";
 
 /**
  * Pending friend request with button context
  */
 interface PendingButtonRequest {
-  requestFrom: string;       // Username of requester
-  requestPubkey: string;     // Public key of requester
-  encryptPub: string;        // Encryption pubkey
+  requestFrom: string; // Username of requester
+  requestPubkey: string; // Public key of requester
+  encryptPub: string; // Encryption pubkey
   timestamp: number;
   channelId: string;
-  messageId?: string;        // ID of the notification message
+  messageId?: string; // ID of the notification message
   signature: string;
 }
 
@@ -48,8 +40,7 @@ export function createFriendRequestButtons(requestFrom: string): ActionRowBuilde
     .setStyle(ButtonStyle.Danger)
     .setEmoji("❌");
 
-  const row = new ActionRowBuilder<ButtonBuilder>()
-    .addComponents(acceptButton, denyButton);
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(acceptButton, denyButton);
 
   return row;
 }
@@ -57,19 +48,15 @@ export function createFriendRequestButtons(requestFrom: string): ActionRowBuilde
 /**
  * Create an embed for the friend request notification
  */
-export function createFriendRequestEmbed(
-  requestFrom: string,
-  pubkeyShort: string,
-  channelName: string
-): EmbedBuilder {
+export function createFriendRequestEmbed(requestFrom: string, pubkeyShort: string, channelName: string): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(0x5865F2)  // Discord blurple
+    .setColor(0x5865f2) // Discord blurple
     .setTitle("Friend Request Received")
     .setDescription(`**@${requestFrom}** wants to be your friend!`)
     .addFields(
       { name: "From", value: `@${requestFrom}`, inline: true },
       { name: "Pubkey", value: pubkeyShort, inline: true },
-      { name: "Channel", value: channelName, inline: true }
+      { name: "Channel", value: channelName, inline: true },
     )
     .setFooter({ text: "Click Accept to add as friend, Deny to ignore" })
     .setTimestamp();
@@ -83,7 +70,7 @@ export function storePendingButtonRequest(
   pubkey: string,
   encryptPub: string,
   channelId: string,
-  signature: string
+  signature: string,
 ): void {
   pendingButtonRequests.set(requestFrom.toLowerCase(), {
     requestFrom,
@@ -135,9 +122,9 @@ export function parseButtonCustomId(customId: string): { action: "accept" | "den
 export async function handleFriendButtonInteraction(
   interaction: ButtonInteraction,
   ctx: WOPRPluginContext,
-  botUsername: string,
+  _botUsername: string,
   onAccept: (from: string, pending: PendingButtonRequest) => Promise<string>,
-  onDeny: (from: string) => Promise<void>
+  onDeny: (from: string) => Promise<void>,
 ): Promise<void> {
   const parsed = parseButtonCustomId(interaction.customId);
   if (!parsed) return;
@@ -151,6 +138,9 @@ export async function handleFriendButtonInteraction(
     return;
   }
 
+  // Defer immediately to avoid Discord's 3-second interaction timeout
+  await interaction.deferUpdate();
+
   if (parsed.action === "accept") {
     try {
       const acceptMessage = await onAccept(parsed.from, pending);
@@ -158,8 +148,8 @@ export async function handleFriendButtonInteraction(
       // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Update the original message to show it was accepted
-      await interaction.update({
+      // Edit the deferred message to show it was accepted
+      await interaction.editReply({
         content: `Friend request from @${parsed.from} **accepted**.`,
         embeds: [],
         components: [],
@@ -167,13 +157,13 @@ export async function handleFriendButtonInteraction(
 
       // Post the accept message to the channel where the request was received
       const channel = interaction.client.channels.cache.get(pending.channelId);
-      if (channel && channel.isTextBased() && "send" in channel) {
+      if (channel?.isTextBased() && "send" in channel) {
         await channel.send(acceptMessage);
       }
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} accepted via button`);
     } catch (err) {
-      await interaction.reply({
+      await interaction.followUp({
         content: `Failed to accept friend request: ${err}`,
         ephemeral: true,
       });
@@ -185,8 +175,8 @@ export async function handleFriendButtonInteraction(
       // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Update the original message to show it was denied
-      await interaction.update({
+      // Edit the deferred message to show it was denied
+      await interaction.editReply({
         content: `Friend request from @${parsed.from} **denied**.`,
         embeds: [],
         components: [],
@@ -194,7 +184,7 @@ export async function handleFriendButtonInteraction(
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} denied via button`);
     } catch (err) {
-      await interaction.reply({
+      await interaction.followUp({
         content: `Failed to deny friend request: ${err}`,
         ephemeral: true,
       });

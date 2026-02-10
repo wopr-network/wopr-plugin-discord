@@ -23,8 +23,8 @@ export interface StreamMessage {
   type: "text" | "assistant" | "tool_use" | "complete" | "error" | "system";
   content: string;
   toolName?: string;
-  subtype?: string;  // For system messages: "init", "compact_boundary", "status", etc.
-  metadata?: Record<string, unknown>;  // For system message metadata (e.g., compact_metadata)
+  subtype?: string; // For system messages: "init", "compact_boundary", "status", etc.
+  metadata?: Record<string, unknown>; // For system message metadata (e.g., compact_metadata)
 }
 
 export interface ChannelInfo {
@@ -189,10 +189,10 @@ export interface WOPRPlugin {
  * Context passed to channel command handlers
  */
 export interface ChannelCommandContext {
-  channel: string;           // Channel identifier (Discord channel ID)
-  channelType: string;       // "discord"
-  sender: string;            // Username of sender
-  args: string[];            // Command arguments
+  channel: string; // Channel identifier (Discord channel ID)
+  channelType: string; // "discord"
+  sender: string; // Username of sender
+  args: string[]; // Command arguments
   reply: (msg: string) => Promise<void>;
   getBotUsername: () => string;
 }

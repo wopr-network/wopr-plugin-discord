@@ -5,7 +5,7 @@
  * The owner DMs the bot, receives a code, then runs the CLI command.
  */
 
-import crypto from "crypto";
+import crypto from "node:crypto";
 import type { WOPRPluginContext } from "./types.js";
 
 // Pairing code settings
@@ -42,7 +42,7 @@ function generateCode(): string {
  * Generate a unique pairing code
  */
 function generateUniqueCode(): string {
-  const existingCodes = new Set(Array.from(pendingPairings.values()).map(p => p.code));
+  const existingCodes = new Set(Array.from(pendingPairings.values()).map((p) => p.code));
   for (let attempt = 0; attempt < 100; attempt++) {
     const code = generateCode();
     if (!existingCodes.has(code)) {
@@ -57,7 +57,7 @@ function generateUniqueCode(): string {
  */
 export function createPairingRequest(discordUserId: string, discordUsername: string): string {
   // Check if there's already a pending request for this user
-  for (const [code, request] of pendingPairings) {
+  for (const [_code, request] of pendingPairings) {
     if (request.discordUserId === discordUserId) {
       // Refresh the existing request
       request.createdAt = Date.now();
