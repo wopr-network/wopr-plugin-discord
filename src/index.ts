@@ -2519,8 +2519,15 @@ const plugin: WOPRPlugin = {
 
         const stream = eventBusStreams.get(payload.session);
         if (stream) {
-          // Stream still in map — wasn't finalized by the complete event (edge case)
-          logger.warn({ msg: "afterInject safety net: finalizing stream that missed complete event", session: payload.session, from: payload.from });
+          // Core doesn't emit "stream" events to plugins, so the event bus stream
+          // created in beforeInject never receives content via ctx.on("stream").
+          // Deliver the full response here instead.
+          if (payload.response) {
+            logger.info({ msg: "Delivering inject response to Discord stream", session: payload.session, from: payload.from, responseLen: payload.response.length });
+            stream.append(payload.response);
+          } else {
+            logger.warn({ msg: "afterInject: no response content to deliver", session: payload.session, from: payload.from });
+          }
           await stream.finalize().catch((err) => {
             logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
           });
