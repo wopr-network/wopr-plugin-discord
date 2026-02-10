@@ -8,7 +8,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --fix src/",
+    "format": "biome format --write src/",
+    "check": "biome check --fix src/ && tsc --noEmit"
   },
   "keywords": [
     "wopr",
@@ -24,6 +28,7 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
     "@types/node": "^20.0.0",
     "typescript": "^5.3.0"
   }

@@ -2,65 +2,57 @@
  * WOPR Discord Plugin - With Slash Commands
  */
 
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
 import {
+  ChannelType,
+  type ChatInputCommandInteraction,
   Client,
-  GatewayIntentBits,
-  Events,
-  Message,
-  TextChannel,
-  ThreadChannel,
   DMChannel,
-  SlashCommandBuilder,
+  Events,
+  GatewayIntentBits,
+  type Message,
+  Partials,
   REST,
   Routes,
-  ChatInputCommandInteraction,
-  PermissionFlagsBits,
-  Partials,
-  ButtonBuilder,
-  ButtonStyle,
-  ActionRowBuilder,
-  ButtonInteraction,
-  ComponentType,
-  ChannelType,
+  SlashCommandBuilder,
+  TextChannel,
+  ThreadChannel,
 } from "discord.js";
 import winston from "winston";
-import path from "path";
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from "fs";
-import { pipeline } from "stream/promises";
 import {
+  cleanupExpiredButtonRequests,
   createFriendRequestButtons,
   createFriendRequestEmbed,
-  storePendingButtonRequest,
   getPendingButtonRequest,
-  removePendingButtonRequest,
-  isFriendRequestButton,
   handleFriendButtonInteraction,
-  cleanupExpiredButtonRequests,
-  getOwnerUserId,
+  isFriendRequestButton,
+  storePendingButtonRequest,
 } from "./friend-buttons.js";
 import {
-  createPairingRequest,
-  claimPairingCode,
   buildPairingMessage,
+  claimPairingCode,
+  cleanupExpiredPairings,
+  createPairingRequest,
   hasOwner,
   setOwner,
-  cleanupExpiredPairings,
 } from "./pairing.js";
 import type {
-  WOPRPlugin,
-  WOPRPluginContext,
-  ConfigSchema,
-  StreamMessage,
   AgentIdentity,
-  ChannelProvider,
   ChannelCommand,
-  ChannelMessageParser,
   ChannelCommandContext,
   ChannelMessageContext,
+  ChannelMessageParser,
+  ChannelProvider,
+  ConfigSchema,
   SessionCreateEvent,
   SessionInjectEvent,
   SessionResponseEvent,
   SessionStreamEvent,
+  StreamMessage,
+  WOPRPlugin,
+  WOPRPluginContext,
 } from "./types.js";
 
 const consoleFormat = winston.format.printf((info) => {
@@ -119,12 +111,25 @@ const consoleFormat = winston.format.printf((info) => {
 
 const logger = winston.createLogger({
   level: "debug",
-  format: winston.format.combine(winston.format.timestamp(), winston.format.errors({ stack: true }), winston.format.json()),
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json(),
+  ),
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
-    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"), level: "error" }),
-    new winston.transports.File({ filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"), level: "debug" }),
-    new winston.transports.Console({ format: winston.format.combine(winston.format.colorize(), consoleFormat), level: "warn" }),
+    new winston.transports.File({
+      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
+      level: "error",
+    }),
+    new winston.transports.File({
+      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"),
+      level: "debug",
+    }),
+    new winston.transports.Console({
+      format: winston.format.combine(winston.format.colorize(), consoleFormat),
+      level: "warn",
+    }),
   ],
 });
 
@@ -141,26 +146,30 @@ let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
  */
 function getSessionKey(channel: TextChannel | ThreadChannel | DMChannel): string {
   // Sanitize name for use in session key (lowercase, replace spaces with -)
-  const sanitize = (name: string) => name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-_]/g, '');
+  const sanitize = (name: string) =>
+    name
+      .toLowerCase()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-z0-9-_]/g, "");
 
   if (channel.isDMBased()) {
     // DM channel - use recipient username
     const dm = channel as DMChannel;
-    const recipientName = dm.recipient?.username || 'unknown';
+    const recipientName = dm.recipient?.username || "unknown";
     return `discord:dm:${sanitize(recipientName)}`;
   }
 
   if (channel.isThread()) {
     // Thread - include parent channel
     const thread = channel as ThreadChannel;
-    const guildName = thread.guild?.name || 'unknown';
-    const parentName = thread.parent?.name || 'unknown';
+    const guildName = thread.guild?.name || "unknown";
+    const parentName = thread.parent?.name || "unknown";
     return `discord:${sanitize(guildName)}:#${sanitize(parentName)}/${sanitize(thread.name)}`;
   }
 
   // Regular text channel
   const textChannel = channel as TextChannel;
-  const guildName = textChannel.guild?.name || 'unknown';
+  const guildName = textChannel.guild?.name || "unknown";
   return `discord:${sanitize(guildName)}:#${sanitize(textChannel.name)}`;
 }
 
@@ -189,18 +198,18 @@ function resolveMentions(message: Message): string {
     const member = message.guild?.members.cache.get(userId);
     const displayName = member?.displayName || user.displayName || user.username;
     // Replace both <@ID> and <@!ID> formats with @Name [ID]
-    content = content.replace(new RegExp(`<@!?${userId}>`, 'g'), `@${displayName} [${userId}]`);
+    content = content.replace(new RegExp(`<@!?${userId}>`, "g"), `@${displayName} [${userId}]`);
   }
 
   // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
   for (const [channelId, channel] of message.mentions.channels) {
     const channelName = (channel as any).name || channelId;
-    content = content.replace(new RegExp(`<#${channelId}>`, 'g'), `#${channelName} [${channelId}]`);
+    content = content.replace(new RegExp(`<#${channelId}>`, "g"), `#${channelName} [${channelId}]`);
   }
 
   // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
   for (const [roleId, role] of message.mentions.roles) {
-    content = content.replace(new RegExp(`<@&${roleId}>`, 'g'), `@${role.name} [${roleId}]`);
+    content = content.replace(new RegExp(`<@&${roleId}>`, "g"), `@${role.name} [${roleId}]`);
   }
 
   return content;
@@ -211,9 +220,7 @@ function resolveMentions(message: Message): string {
  * Looks for the most recent message with a Discord channel reference.
  */
 function findChannelIdFromConversationLog(sessionName: string): string | null {
-  const sessionsDir = process.env.WOPR_HOME
-    ? path.join(process.env.WOPR_HOME, "sessions")
-    : "/data/sessions";
+  const sessionsDir = process.env.WOPR_HOME ? path.join(process.env.WOPR_HOME, "sessions") : "/data/sessions";
   const logPath = path.join(sessionsDir, `${sessionName}.conversation.jsonl`);
 
   if (!existsSync(logPath)) {
@@ -223,7 +230,10 @@ function findChannelIdFromConversationLog(sessionName: string): string | null {
 
   try {
     const content = readFileSync(logPath, "utf-8");
-    const lines = content.trim().split("\n").filter(l => l);
+    const lines = content
+      .trim()
+      .split("\n")
+      .filter((l) => l);
 
     // Search from most recent entry backwards for a Discord channel reference
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -248,23 +258,16 @@ function findChannelIdFromConversationLog(sessionName: string): string | null {
 
 // Slash command definitions
 const commands = [
-  new SlashCommandBuilder()
-    .setName("status")
-    .setDescription("Show session status and configuration"),
-  new SlashCommandBuilder()
-    .setName("new")
-    .setDescription("Start a new session (reset conversation)"),
-  new SlashCommandBuilder()
-    .setName("reset")
-    .setDescription("Reset the current session (alias for /new)"),
-  new SlashCommandBuilder()
-    .setName("compact")
-    .setDescription("Compact session context (summarize conversation)"),
+  new SlashCommandBuilder().setName("status").setDescription("Show session status and configuration"),
+  new SlashCommandBuilder().setName("new").setDescription("Start a new session (reset conversation)"),
+  new SlashCommandBuilder().setName("reset").setDescription("Reset the current session (alias for /new)"),
+  new SlashCommandBuilder().setName("compact").setDescription("Compact session context (summarize conversation)"),
   new SlashCommandBuilder()
     .setName("think")
     .setDescription("Set the thinking level for responses")
-    .addStringOption(option =>
-      option.setName("level")
+    .addStringOption((option) =>
+      option
+        .setName("level")
         .setDescription("Thinking level")
         .setRequired(true)
         .addChoices(
@@ -273,68 +276,54 @@ const commands = [
           { name: "Low", value: "low" },
           { name: "Medium", value: "medium" },
           { name: "High", value: "high" },
-          { name: "Maximum", value: "xhigh" }
-        )
+          { name: "Maximum", value: "xhigh" },
+        ),
     ),
   new SlashCommandBuilder()
     .setName("verbose")
     .setDescription("Toggle verbose mode")
-    .addBooleanOption(option =>
-      option.setName("enabled")
-        .setDescription("Enable or disable verbose mode")
-        .setRequired(true)
+    .addBooleanOption((option) =>
+      option.setName("enabled").setDescription("Enable or disable verbose mode").setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("usage")
     .setDescription("Set usage tracking display")
-    .addStringOption(option =>
-      option.setName("mode")
+    .addStringOption((option) =>
+      option
+        .setName("mode")
         .setDescription("Usage display mode")
         .setRequired(true)
         .addChoices(
           { name: "Off", value: "off" },
           { name: "Tokens only", value: "tokens" },
-          { name: "Full", value: "full" }
-        )
+          { name: "Full", value: "full" },
+        ),
     ),
   new SlashCommandBuilder()
     .setName("session")
     .setDescription("Switch to a different session")
-    .addStringOption(option =>
-      option.setName("name")
-        .setDescription("Session name")
-        .setRequired(true)
-    ),
+    .addStringOption((option) => option.setName("name").setDescription("Session name").setRequired(true)),
   new SlashCommandBuilder()
     .setName("wopr")
     .setDescription("Send a message to WOPR")
-    .addStringOption(option =>
-      option.setName("message")
-        .setDescription("Your message")
-        .setRequired(true)
-    ),
-  new SlashCommandBuilder()
-    .setName("help")
-    .setDescription("Show available commands and help"),
+    .addStringOption((option) => option.setName("message").setDescription("Your message").setRequired(true)),
+  new SlashCommandBuilder().setName("help").setDescription("Show available commands and help"),
   new SlashCommandBuilder()
     .setName("claim")
     .setDescription("Claim ownership of this bot with a pairing code (DM only)")
-    .addStringOption(option =>
-      option.setName("code")
-        .setDescription("The pairing code you received")
-        .setRequired(true)
+    .addStringOption((option) =>
+      option.setName("code").setDescription("The pairing code you received").setRequired(true),
     ),
-  new SlashCommandBuilder()
-    .setName("cancel")
-    .setDescription("Cancel the current AI response in progress"),
+  new SlashCommandBuilder().setName("cancel").setDescription("Cancel the current AI response in progress"),
   new SlashCommandBuilder()
     .setName("model")
     .setDescription("Switch the AI model for this session")
-    .addStringOption(option =>
-      option.setName("model")
+    .addStringOption((option) =>
+      option
+        .setName("model")
         .setDescription("Model name or ID (e.g. opus, haiku, gpt-5.2)")
         .setRequired(true)
-        .setAutocomplete(true)
+        .setAutocomplete(true),
     ),
 ];
 
@@ -349,7 +338,7 @@ interface ResolvedModel {
 function getAllModels(): ResolvedModel[] {
   const results: ResolvedModel[] = [];
   // Get all registered providers via the plugin context
-  const providers = (ctx as any)?.getChannelProviders?.() || [];
+  const _providers = (ctx as any)?.getChannelProviders?.() || [];
   // Direct approach: iterate known provider IDs from the registry
   const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
   for (const pid of providerIds) {
@@ -399,15 +388,15 @@ function resolveModel(input: string): { provider: string; id: string; name: stri
   const q = input.toLowerCase().trim();
 
   // Exact ID match
-  const exact = models.find(m => m.id === q);
+  const exact = models.find((m) => m.id === q);
   if (exact) return exact;
 
   // Substring match on model ID
-  const partial = models.find(m => m.id.includes(q));
+  const partial = models.find((m) => m.id.includes(q));
   if (partial) return partial;
 
   // Substring match on display name
-  const byName = models.find(m => m.name.toLowerCase().includes(q));
+  const byName = models.find((m) => m.name.toLowerCase().includes(q));
   if (byName) return byName;
 
   return null;
@@ -438,7 +427,7 @@ let reactionEmojis = {
   cancelled: "⏹️",
 };
 
-function getReactionEmoji(state: keyof typeof reactionEmojis): string {
+function _getReactionEmoji(state: keyof typeof reactionEmojis): string {
   return reactionEmojis[state];
 }
 
@@ -468,11 +457,11 @@ const REACTION_DONE = () => reactionEmojis.done;
 const REACTION_ERROR = () => reactionEmojis.error;
 const REACTION_CANCELLED = () => reactionEmojis.cancelled;
 
-function getAckReaction(): string {
+function _getAckReaction(): string {
   return agentIdentity.emoji?.trim() || "👀";
 }
 
-function getMessagePrefix(): string {
+function _getMessagePrefix(): string {
   const name = agentIdentity.name?.trim();
   return name ? `[${name}]` : "[WOPR]";
 }
@@ -485,8 +474,14 @@ async function setMessageReaction(message: Message, reaction: string | (() => st
 
   const botId = client.user.id;
   // Call functions to get current emoji values
-  const stateReactions = [REACTION_QUEUED(), REACTION_ACTIVE(), REACTION_DONE(), REACTION_ERROR(), REACTION_CANCELLED()];
-  const reactionValue = typeof reaction === 'function' ? reaction() : reaction;
+  const stateReactions = [
+    REACTION_QUEUED(),
+    REACTION_ACTIVE(),
+    REACTION_DONE(),
+    REACTION_ERROR(),
+    REACTION_CANCELLED(),
+  ];
+  const reactionValue = typeof reaction === "function" ? reaction() : reaction;
 
   try {
     // Remove any existing state reactions from us
@@ -496,7 +491,7 @@ async function setMessageReaction(message: Message, reaction: string | (() => st
         if (existingReaction?.users.cache.has(botId)) {
           await existingReaction.users.remove(botId);
         }
-      } catch (e) {
+      } catch (_e) {
         // Ignore - reaction might not exist
       }
     }
@@ -516,7 +511,13 @@ async function clearMessageReactions(message: Message): Promise<void> {
 
   const botId = client.user.id;
   // Call functions to get current emoji values
-  const stateReactions = [REACTION_QUEUED(), REACTION_ACTIVE(), REACTION_DONE(), REACTION_ERROR(), REACTION_CANCELLED()];
+  const stateReactions = [
+    REACTION_QUEUED(),
+    REACTION_ACTIVE(),
+    REACTION_DONE(),
+    REACTION_ERROR(),
+    REACTION_CANCELLED(),
+  ];
 
   for (const emoji of stateReactions) {
     try {
@@ -524,7 +525,7 @@ async function clearMessageReactions(message: Message): Promise<void> {
       if (existingReaction?.users.cache.has(botId)) {
         await existingReaction.users.remove(botId);
       }
-    } catch (e) {
+    } catch (_e) {
       // Ignore
     }
   }
@@ -541,8 +542,8 @@ interface TypingState {
 }
 
 const typingStates = new Map<string, TypingState>();
-const TYPING_REFRESH_MS = 8000;  // Discord typing indicator lasts ~10s, refresh at 8s
-const TYPING_IDLE_TIMEOUT_MS = 5000;  // Stop typing after 5s of no activity
+const TYPING_REFRESH_MS = 8000; // Discord typing indicator lasts ~10s, refresh at 8s
+const TYPING_IDLE_TIMEOUT_MS = 5000; // Stop typing after 5s of no activity
 
 /**
  * Start showing typing indicator in a channel.
@@ -557,7 +558,7 @@ async function startTyping(channel: TextChannel | ThreadChannel | DMChannel): Pr
   const state: TypingState = {
     interval: null,
     lastActivity: Date.now(),
-    active: true
+    active: true,
   };
 
   // Send initial typing indicator
@@ -586,7 +587,7 @@ async function startTyping(channel: TextChannel | ThreadChannel | DMChannel): Pr
       try {
         await channel.sendTyping();
         logger.debug({ msg: "Typing indicator refreshed", channelId });
-      } catch (e) {
+      } catch (_e) {
         // Channel might be gone, stop typing
         stopTyping(channelId);
       }
@@ -626,7 +627,10 @@ function stopTyping(channelId: string, channel?: TextChannel | ThreadChannel | D
 
   // Force-clear typing by sending and immediately deleting an invisible message
   if (channel) {
-    channel.send("\u200b").then((m: any) => m.delete().catch(() => {})).catch(() => {});
+    channel
+      .send("\u200b")
+      .then((m: any) => m.delete().catch(() => {}))
+      .catch(() => {});
   }
 }
 
@@ -634,15 +638,75 @@ const configSchema: ConfigSchema = {
   title: "Discord Integration",
   description: "Configure Discord bot integration with slash commands",
   fields: [
-    { name: "token", type: "password", label: "Discord Bot Token", placeholder: "Bot token from Discord Developer Portal", required: true, description: "Your Discord bot token" },
-    { name: "guildId", type: "text", label: "Guild ID (optional)", placeholder: "Server ID to restrict bot to", description: "Restrict bot to a specific Discord server" },
-    { name: "clientId", type: "text", label: "Application ID", placeholder: "From Discord Developer Portal", description: "Discord Application ID (for slash commands)" },
-    { name: "ownerUserId", type: "text", label: "Owner User ID (optional)", placeholder: "Your Discord user ID", description: "Receive private notifications for friend requests" },
-    { name: "emojiQueued", type: "text", label: "Queued Emoji", placeholder: "🕐", default: "🕐", description: "Emoji shown when message is queued" },
-    { name: "emojiActive", type: "text", label: "Active Emoji", placeholder: "⚡", default: "⚡", description: "Emoji shown when processing" },
-    { name: "emojiDone", type: "text", label: "Done Emoji", placeholder: "✅", default: "✅", description: "Emoji shown when complete" },
-    { name: "emojiError", type: "text", label: "Error Emoji", placeholder: "❌", default: "❌", description: "Emoji shown on error" },
-    { name: "emojiCancelled", type: "text", label: "Cancelled Emoji", placeholder: "⏹️", default: "⏹️", description: "Emoji shown when cancelled" },
+    {
+      name: "token",
+      type: "password",
+      label: "Discord Bot Token",
+      placeholder: "Bot token from Discord Developer Portal",
+      required: true,
+      description: "Your Discord bot token",
+    },
+    {
+      name: "guildId",
+      type: "text",
+      label: "Guild ID (optional)",
+      placeholder: "Server ID to restrict bot to",
+      description: "Restrict bot to a specific Discord server",
+    },
+    {
+      name: "clientId",
+      type: "text",
+      label: "Application ID",
+      placeholder: "From Discord Developer Portal",
+      description: "Discord Application ID (for slash commands)",
+    },
+    {
+      name: "ownerUserId",
+      type: "text",
+      label: "Owner User ID (optional)",
+      placeholder: "Your Discord user ID",
+      description: "Receive private notifications for friend requests",
+    },
+    {
+      name: "emojiQueued",
+      type: "text",
+      label: "Queued Emoji",
+      placeholder: "🕐",
+      default: "🕐",
+      description: "Emoji shown when message is queued",
+    },
+    {
+      name: "emojiActive",
+      type: "text",
+      label: "Active Emoji",
+      placeholder: "⚡",
+      default: "⚡",
+      description: "Emoji shown when processing",
+    },
+    {
+      name: "emojiDone",
+      type: "text",
+      label: "Done Emoji",
+      placeholder: "✅",
+      default: "✅",
+      description: "Emoji shown when complete",
+    },
+    {
+      name: "emojiError",
+      type: "text",
+      label: "Error Emoji",
+      placeholder: "❌",
+      default: "❌",
+      description: "Emoji shown on error",
+    },
+    {
+      name: "emojiCancelled",
+      type: "text",
+      label: "Cancelled Emoji",
+      placeholder: "⏹️",
+      default: "⏹️",
+      description: "Emoji shown when cancelled",
+    },
     { name: "pairingRequests", type: "object", hidden: true, default: {} },
     { name: "mappings", type: "object", hidden: true, default: {} },
   ],
@@ -655,7 +719,7 @@ interface SessionState {
   usageMode: string;
   messageCount: number;
   model: string;
-  lastBotInteraction?: Record<string, number>;  // botId -> timestamp for cooldown
+  lastBotInteraction?: Record<string, number>; // botId -> timestamp for cooldown
 }
 
 const sessionStates = new Map<string, SessionState>();
@@ -667,7 +731,7 @@ function getSessionState(sessionKey: string): SessionState {
       verbose: false,
       usageMode: "tokens",
       messageCount: 0,
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-4-20250514",
     });
   }
   return sessionStates.get(sessionKey)!;
@@ -682,7 +746,7 @@ interface BufferedMessage {
   content: string;
   timestamp: number;
   isBot: boolean;
-  isMention: boolean;  // was this bot directly @mentioned?
+  isMention: boolean; // was this bot directly @mentioned?
   originalMessage: Message;
 }
 
@@ -693,7 +757,7 @@ interface QueuedInject {
   replyToMessage: Message;
   isBot: boolean;
   queuedAt: number;
-  cooldownUntil?: number;  // for bot messages only
+  cooldownUntil?: number; // for bot messages only
 }
 
 interface ChannelQueue {
@@ -708,8 +772,8 @@ interface ChannelQueue {
 }
 
 const channelQueues = new Map<string, ChannelQueue>();
-const HUMAN_TYPING_WINDOW_MS = 15000;  // 15s after human stops typing
-const BOT_COOLDOWN_MS = 5000;          // 5s between bot responses
+const HUMAN_TYPING_WINDOW_MS = 15000; // 15s after human stops typing
+const BOT_COOLDOWN_MS = 5000; // 5s between bot responses
 
 function getChannelQueue(channelId: string): ChannelQueue {
   if (!channelQueues.has(channelId)) {
@@ -718,7 +782,7 @@ function getChannelQueue(channelId: string): ChannelQueue {
       processingChain: Promise.resolve(),
       pendingItems: [],
       humanTypingUntil: 0,
-      currentInject: null
+      currentInject: null,
     });
   }
   return channelQueues.get(channelId)!;
@@ -731,7 +795,14 @@ function addToBuffer(channelId: string, msg: BufferedMessage) {
   if (queue.buffer.length > 20) {
     queue.buffer.shift();
   }
-  logger.info({ msg: "Buffer add", channelId, from: msg.from, isBot: msg.isBot, isMention: msg.isMention, bufferSize: queue.buffer.length });
+  logger.info({
+    msg: "Buffer add",
+    channelId,
+    from: msg.from,
+    isBot: msg.isBot,
+    isMention: msg.isMention,
+    bufferSize: queue.buffer.length,
+  });
 }
 
 function getBufferContext(channelId: string): string {
@@ -739,10 +810,10 @@ function getBufferContext(channelId: string): string {
   if (queue.buffer.length === 0) return "";
 
   // Build context from buffer (exclude the triggering message itself)
-  const contextLines = queue.buffer.slice(0, -1).map(m => `${m.from}: ${m.content}`);
+  const contextLines = queue.buffer.slice(0, -1).map((m) => `${m.from}: ${m.content}`);
   if (contextLines.length === 0) return "";
 
-  return `[Recent conversation context]\n${contextLines.join('\n')}\n[End context]\n\n`;
+  return `[Recent conversation context]\n${contextLines.join("\n")}\n[End context]\n\n`;
 }
 
 function clearBuffer(channelId: string) {
@@ -750,7 +821,7 @@ function clearBuffer(channelId: string) {
   queue.buffer = [];
 }
 
-function isHumanTyping(channelId: string): boolean {
+function _isHumanTyping(channelId: string): boolean {
   const queue = getChannelQueue(channelId);
   return Date.now() < queue.humanTypingUntil;
 }
@@ -774,12 +845,21 @@ function queueInject(channelId: string, item: QueuedInject) {
     queue.pendingItems.push(item);
     // Show queued reaction
     setMessageReaction(item.replyToMessage, REACTION_QUEUED).catch(() => {});
-    logger.info({ msg: "Bot inject queued (pending cooldown)", channelId, from: item.authorDisplayName, queueSize: queue.pendingItems.length });
+    logger.info({
+      msg: "Bot inject queued (pending cooldown)",
+      channelId,
+      from: item.authorDisplayName,
+      queueSize: queue.pendingItems.length,
+    });
   } else {
     // Human messages: add directly to promise chain (immediate priority)
     // Also clear any pending bot messages - human takes priority
     if (queue.pendingItems.length > 0) {
-      logger.info({ msg: "Clearing pending bot messages - human priority", channelId, cleared: queue.pendingItems.length });
+      logger.info({
+        msg: "Clearing pending bot messages - human priority",
+        channelId,
+        cleared: queue.pendingItems.length,
+      });
       // Clear queued reactions from cancelled bot messages
       for (const pending of queue.pendingItems) {
         clearMessageReactions(pending.replyToMessage).catch(() => {});
@@ -906,10 +986,8 @@ let cleanupInterval: NodeJS.Timeout | null = null;
 function startQueueProcessor() {
   if (queueProcessorInterval) return;
   queueProcessorInterval = setInterval(() => {
-    processPendingBotResponses().catch(err =>
-      logger.error({ msg: "Queue processor error", error: String(err) })
-    );
-  }, 1000);  // Check every second
+    processPendingBotResponses().catch((err) => logger.error({ msg: "Queue processor error", error: String(err) }));
+  }, 1000); // Check every second
   logger.info({ msg: "Queue processor started" });
 }
 
@@ -978,7 +1056,7 @@ const discordChannelProvider: ChannelProvider = {
   async send(channelId: string, content: string): Promise<void> {
     if (!client) throw new Error("Discord client not initialized");
     const channel = await client.channels.fetch(channelId);
-    if (channel && channel.isTextBased() && 'send' in channel) {
+    if (channel?.isTextBased() && "send" in channel) {
       // Split content into chunks of 2000 chars (Discord limit)
       const chunks: string[] = [];
       let remaining = content;
@@ -988,8 +1066,8 @@ const discordChannelProvider: ChannelProvider = {
           break;
         }
         // Try to split at a newline or space near the limit
-        let splitAt = remaining.lastIndexOf('\n', 2000);
-        if (splitAt < 1500) splitAt = remaining.lastIndexOf(' ', 2000);
+        let splitAt = remaining.lastIndexOf("\n", 2000);
+        if (splitAt < 1500) splitAt = remaining.lastIndexOf(" ", 2000);
         if (splitAt < 1500) splitAt = 2000;
         chunks.push(remaining.slice(0, splitAt));
         remaining = remaining.slice(splitAt).trimStart();
@@ -1017,7 +1095,7 @@ async function sendFriendRequestNotification(
   encryptPub: string,
   channelId: string,
   channelName: string,
-  signature: string
+  signature: string,
 ): Promise<boolean> {
   if (!ctx || !client) return false;
 
@@ -1039,7 +1117,7 @@ async function sendFriendRequestNotification(
     storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
 
     // Create the embed and buttons
-    const pubkeyShort = pubkey.slice(0, 12) + "...";
+    const pubkeyShort = `${pubkey.slice(0, 12)}...`;
     const embed = createFriendRequestEmbed(requestFrom, pubkeyShort, channelName);
     const buttons = createFriendRequestButtons(requestFrom);
 
@@ -1063,7 +1141,9 @@ const discordExtension = {
   getBotUsername: () => client?.user?.username || "unknown",
 
   // Pairing methods for CLI
-  claimOwnership: async (code: string): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
+  claimOwnership: async (
+    code: string,
+  ): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
     if (!ctx) return { success: false, error: "Discord plugin not initialized" };
 
     const request = claimPairingCode(code);
@@ -1081,7 +1161,7 @@ const discordExtension = {
     };
   },
 
-  hasOwner: () => ctx ? hasOwner(ctx) : false,
+  hasOwner: () => (ctx ? hasOwner(ctx) : false),
   getOwnerId: () => ctx?.getConfig<{ ownerUserId?: string }>()?.ownerUserId || null,
 };
 
@@ -1121,7 +1201,7 @@ async function handleRegisteredCommand(message: Message): Promise<boolean> {
   } catch (error) {
     logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
     await message.reply(`Error executing /${cmdName}: ${error}`);
-    return true;  // Still handled, just with error
+    return true; // Still handled, just with error
   }
 }
 
@@ -1175,28 +1255,24 @@ const IDLE_SPLIT_MS = 3500;
 
 // Explicit state machine - each state is mutually exclusive
 type MessageState =
-  | { status: 'buffering'; content: string }
-  | { status: 'sending'; content: string; promise: Promise<Message> }
-  | { status: 'sent'; content: string; discordMsg: Message; lastEditLength: number }
-  | { status: 'finalized' };
+  | { status: "buffering"; content: string }
+  | { status: "sending"; content: string; promise: Promise<Message> }
+  | { status: "sent"; content: string; discordMsg: Message; lastEditLength: number }
+  | { status: "finalized" };
 
 /**
  * Manages a single Discord message's lifecycle with edit-in-place support.
  * Uses explicit state machine to prevent race conditions.
  */
 class DiscordMessageUnit {
-  private state: MessageState = { status: 'buffering', content: '' };
+  private state: MessageState = { status: "buffering", content: "" };
   private readonly channel: TextChannel | ThreadChannel | DMChannel;
   private readonly replyTo: Message;
   private readonly isReply: boolean;
   private readonly unitId: string;
-  private _overflow: string = "";  // Content that didn't fit after a split
+  private _overflow: string = ""; // Content that didn't fit after a split
 
-  constructor(
-    channel: TextChannel | ThreadChannel | DMChannel,
-    replyTo: Message,
-    isReply: boolean
-  ) {
+  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message, isReply: boolean) {
     this.channel = channel;
     this.replyTo = replyTo;
     this.isReply = isReply;
@@ -1205,51 +1281,57 @@ class DiscordMessageUnit {
   }
 
   get content(): string {
-    if (this.state.status === 'finalized') return '';
+    if (this.state.status === "finalized") return "";
     return this.state.content;
   }
 
   get isFinalized(): boolean {
-    return this.state.status === 'finalized';
+    return this.state.status === "finalized";
   }
 
   get discordMsg(): Message | null {
-    if (this.state.status === 'sent') return this.state.discordMsg;
+    if (this.state.status === "sent") return this.state.discordMsg;
     return null;
   }
 
   append(text: string): void {
-    if (this.state.status === 'finalized') {
+    if (this.state.status === "finalized") {
       logger.debug({ msg: "Unit.append ignored - finalized", unitId: this.unitId, textLen: text.length });
       return;
     }
-    if (this.state.status === 'sending') {
+    if (this.state.status === "sending") {
       logger.debug({ msg: "Unit.append ignored - sending", unitId: this.unitId, textLen: text.length });
       return;
     }
     const prevLen = this.state.content.length;
     this.state = { ...this.state, content: this.state.content + text };
-    logger.debug({ msg: "Unit.append", unitId: this.unitId, added: text.length, totalLen: this.state.content.length, prevLen });
+    logger.debug({
+      msg: "Unit.append",
+      unitId: this.unitId,
+      added: text.length,
+      totalLen: this.state.content.length,
+      prevLen,
+    });
   }
 
   /**
    * Attempt to flush content to Discord.
    * Returns 'split' if content exceeded limit and needs continuation.
    */
-  async flush(): Promise<'ok' | 'split' | 'skip'> {
-    if (this.state.status === 'finalized') {
+  async flush(): Promise<"ok" | "split" | "skip"> {
+    if (this.state.status === "finalized") {
       logger.debug({ msg: "Unit.flush skip - finalized", unitId: this.unitId });
-      return 'skip';
+      return "skip";
     }
-    if (this.state.status === 'sending') {
+    if (this.state.status === "sending") {
       logger.debug({ msg: "Unit.flush skip - sending", unitId: this.unitId });
-      return 'skip';
+      return "skip";
     }
 
     const content = this.state.content.trim();
     if (!content) {
       logger.debug({ msg: "Unit.flush skip - empty", unitId: this.unitId });
-      return 'skip';
+      return "skip";
     }
 
     logger.debug({ msg: "Unit.flush", unitId: this.unitId, status: this.state.status, contentLen: content.length });
@@ -1261,96 +1343,98 @@ class DiscordMessageUnit {
     }
 
     // In buffering state - send initial message (any content is enough)
-    if (this.state.status === 'buffering') {
+    if (this.state.status === "buffering") {
       return this.sendInitial(content);
     }
 
     // In sent state - edit with new content
-    if (this.state.status === 'sent') {
+    if (this.state.status === "sent") {
       if (content.length === this.state.lastEditLength) {
         logger.debug({ msg: "Unit.flush skip - no new content", unitId: this.unitId });
-        return 'skip';
+        return "skip";
       }
       return this.editExisting(content);
     }
 
-    return 'skip';
+    return "skip";
   }
 
-  private async sendInitial(content: string): Promise<'ok' | 'split' | 'skip'> {
-    if (this.state.status !== 'buffering') return 'skip';
+  private async sendInitial(content: string): Promise<"ok" | "split" | "skip"> {
+    if (this.state.status !== "buffering") return "skip";
 
     logger.debug({ msg: "Unit.sendInitial", unitId: this.unitId, contentLen: content.length, isReply: this.isReply });
 
     // Transition: buffering → sending
-    const promise = this.isReply
-      ? this.replyTo.reply(content)
-      : this.channel.send(content);
-    this.state = { status: 'sending', content, promise };
+    const promise = this.isReply ? this.replyTo.reply(content) : this.channel.send(content);
+    this.state = { status: "sending", content, promise };
 
     try {
       const discordMsg = await promise;
       // Transition: sending → sent
-      this.state = { status: 'sent', content, discordMsg, lastEditLength: content.length };
+      this.state = { status: "sent", content, discordMsg, lastEditLength: content.length };
       logger.debug({ msg: "Unit.sendInitial success", unitId: this.unitId, msgId: discordMsg.id });
-      return 'ok';
+      return "ok";
     } catch (error) {
       // Rollback to buffering on failure
-      this.state = { status: 'buffering', content };
+      this.state = { status: "buffering", content };
       logger.error({ msg: "Unit.sendInitial failed", unitId: this.unitId, error: String(error) });
       throw error;
     }
   }
 
-  private async editExisting(content: string): Promise<'ok' | 'split' | 'skip'> {
-    if (this.state.status !== 'sent') return 'skip';
+  private async editExisting(content: string): Promise<"ok" | "split" | "skip"> {
+    if (this.state.status !== "sent") return "skip";
 
     logger.debug({ msg: "Unit.editExisting", unitId: this.unitId, contentLen: content.length });
     await this.state.discordMsg.edit(content);
     this.state = { ...this.state, content, lastEditLength: content.length };
     logger.debug({ msg: "Unit.editExisting success", unitId: this.unitId });
-    return 'ok';
+    return "ok";
   }
 
-  private async handleOverflow(content: string): Promise<'ok' | 'split' | 'skip'> {
+  private async handleOverflow(content: string): Promise<"ok" | "split" | "skip"> {
     // Find a word boundary to split at (don't cut mid-word)
     let splitAt = DISCORD_LIMIT;
-    const lastSpace = content.lastIndexOf(' ', DISCORD_LIMIT);
-    const lastNewline = content.lastIndexOf('\n', DISCORD_LIMIT);
+    const lastSpace = content.lastIndexOf(" ", DISCORD_LIMIT);
+    const lastNewline = content.lastIndexOf("\n", DISCORD_LIMIT);
     const bestBreak = Math.max(lastSpace, lastNewline);
     if (bestBreak > DISCORD_LIMIT * 0.75) {
       splitAt = bestBreak;
     }
     const toSend = content.slice(0, splitAt);
     const overflow = content.slice(splitAt).trimStart();
-    logger.debug({ msg: "Unit.handleOverflow", unitId: this.unitId, toSendLen: toSend.length, overflowLen: overflow.length, splitAt });
+    logger.debug({
+      msg: "Unit.handleOverflow",
+      unitId: this.unitId,
+      toSendLen: toSend.length,
+      overflowLen: overflow.length,
+      splitAt,
+    });
 
-    if (this.state.status === 'buffering') {
+    if (this.state.status === "buffering") {
       // Send initial with truncated content
-      const promise = this.isReply
-        ? this.replyTo.reply(toSend)
-        : this.channel.send(toSend);
-      this.state = { status: 'sending', content: toSend, promise };
+      const promise = this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend);
+      this.state = { status: "sending", content: toSend, promise };
 
       try {
         await promise;
         // Mark as finalized - overflow will be new message
-        this.state = { status: 'finalized' };
+        this.state = { status: "finalized" };
         logger.debug({ msg: "Unit.handleOverflow sent and finalized", unitId: this.unitId });
       } catch (error) {
-        this.state = { status: 'buffering', content };
+        this.state = { status: "buffering", content };
         logger.error({ msg: "Unit.handleOverflow failed", unitId: this.unitId, error: String(error) });
         throw error;
       }
-    } else if (this.state.status === 'sent') {
+    } else if (this.state.status === "sent") {
       await this.state.discordMsg.edit(toSend);
-      this.state = { status: 'finalized' };
+      this.state = { status: "finalized" };
       logger.debug({ msg: "Unit.handleOverflow edited and finalized", unitId: this.unitId });
     }
 
     // Store overflow so the stream can retrieve it
     this._overflow = overflow;
-    return 'split';
+    return "split";
   }
 
   /** Get the overflow content from the last split. */
@@ -1363,23 +1447,33 @@ class DiscordMessageUnit {
    * Safe to call multiple times.
    */
   async finalize(): Promise<void> {
-    logger.debug({ msg: "Unit.finalize called", unitId: this.unitId, status: this.state.status, contentLen: this.state.status !== 'finalized' ? this.state.content.length : 0 });
+    logger.debug({
+      msg: "Unit.finalize called",
+      unitId: this.unitId,
+      status: this.state.status,
+      contentLen: this.state.status !== "finalized" ? this.state.content.length : 0,
+    });
 
-    if (this.state.status === 'finalized') {
+    if (this.state.status === "finalized") {
       logger.debug({ msg: "Unit.finalize skip - already finalized", unitId: this.unitId });
       return;
     }
 
     // Wait for any in-flight send to complete
-    if (this.state.status === 'sending') {
+    if (this.state.status === "sending") {
       logger.debug({ msg: "Unit.finalize waiting for send", unitId: this.unitId });
       try {
         const discordMsg = await this.state.promise;
-        this.state = { status: 'sent', content: this.state.content, discordMsg, lastEditLength: this.state.content.length };
+        this.state = {
+          status: "sent",
+          content: this.state.content,
+          discordMsg,
+          lastEditLength: this.state.content.length,
+        };
         logger.debug({ msg: "Unit.finalize send completed", unitId: this.unitId, msgId: discordMsg.id });
       } catch (error) {
         logger.error({ msg: "Unit.finalize send failed", unitId: this.unitId, error: String(error) });
-        this.state = { status: 'finalized' };
+        this.state = { status: "finalized" };
         return;
       }
     }
@@ -1387,21 +1481,26 @@ class DiscordMessageUnit {
     const content = this.state.content.trim();
     if (!content) {
       logger.debug({ msg: "Unit.finalize skip - empty content", unitId: this.unitId });
-      this.state = { status: 'finalized' };
+      this.state = { status: "finalized" };
       return;
     }
 
     // Immediately mark as finalized to prevent races
     const prevState = this.state;
-    this.state = { status: 'finalized' };
+    this.state = { status: "finalized" };
 
     try {
-      if (prevState.status === 'sent') {
+      if (prevState.status === "sent") {
         logger.debug({ msg: "Unit.finalize editing sent message", unitId: this.unitId, contentLen: content.length });
         await prevState.discordMsg.edit(content.slice(0, DISCORD_LIMIT));
         logger.debug({ msg: "Unit.finalize edit success", unitId: this.unitId });
-      } else if (prevState.status === 'buffering') {
-        logger.debug({ msg: "Unit.finalize sending buffered content", unitId: this.unitId, contentLen: content.length, isReply: this.isReply });
+      } else if (prevState.status === "buffering") {
+        logger.debug({
+          msg: "Unit.finalize sending buffered content",
+          unitId: this.unitId,
+          contentLen: content.length,
+          isReply: this.isReply,
+        });
         const msg = this.isReply
           ? await this.replyTo.reply(content.slice(0, DISCORD_LIMIT))
           : await this.channel.send(content.slice(0, DISCORD_LIMIT));
@@ -1413,7 +1512,6 @@ class DiscordMessageUnit {
       logger.error({ msg: "Unit.finalize failed", unitId: this.unitId, error: String(error) });
     }
   }
-
 }
 
 /**
@@ -1448,7 +1546,9 @@ class DiscordMessageStream {
   private async refreshTyping(): Promise<void> {
     try {
       await this.channel.sendTyping();
-    } catch (_) { /* channel gone, ignore */ }
+    } catch (_) {
+      /* channel gone, ignore */
+    }
   }
 
   /**
@@ -1460,7 +1560,12 @@ class DiscordMessageStream {
       return;
     }
     this.pendingContent.push(text);
-    logger.debug({ msg: "Stream.append", streamId: this.streamId, textLen: text.length, pendingCount: this.pendingContent.length });
+    logger.debug({
+      msg: "Stream.append",
+      streamId: this.streamId,
+      textLen: text.length,
+      pendingCount: this.pendingContent.length,
+    });
   }
 
   private async processPending(): Promise<void> {
@@ -1480,7 +1585,12 @@ class DiscordMessageStream {
 
       // Idle split: long pause with existing content → start new message
       if (timeSinceLast > IDLE_SPLIT_MS && this.currentUnit.content.length > 0) {
-        logger.info({ msg: "Stream idle split", streamId: this.streamId, timeSinceLast, unitContent: this.currentUnit.content.length });
+        logger.info({
+          msg: "Stream idle split",
+          streamId: this.streamId,
+          timeSinceLast,
+          unitContent: this.currentUnit.content.length,
+        });
         await this.currentUnit.finalize();
         this.completedUnits.push(this.currentUnit);
         this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
@@ -1510,9 +1620,14 @@ class DiscordMessageStream {
     while (true) {
       const currentContent = this.currentUnit.content;
       const result = await this.currentUnit.flush();
-      logger.debug({ msg: "Stream.flushWithOverflowHandling result", streamId: this.streamId, result, contentLen: currentContent.length });
+      logger.debug({
+        msg: "Stream.flushWithOverflowHandling result",
+        streamId: this.streamId,
+        result,
+        contentLen: currentContent.length,
+      });
 
-      if (result === 'split') {
+      if (result === "split") {
         // Unit split at a word boundary and finalized - get the overflow it stored
         const overflow = this.currentUnit.overflow;
         logger.info({ msg: "Stream overflow split", streamId: this.streamId, overflowLen: overflow.length });
@@ -1536,7 +1651,13 @@ class DiscordMessageStream {
    * Finalize the entire stream - flush any remaining content.
    */
   async finalize(): Promise<void> {
-    logger.info({ msg: "Stream.finalize called", streamId: this.streamId, finalized: this.finalized, processing: this.processing, pendingCount: this.pendingContent.length });
+    logger.info({
+      msg: "Stream.finalize called",
+      streamId: this.streamId,
+      finalized: this.finalized,
+      processing: this.processing,
+      pendingCount: this.pendingContent.length,
+    });
 
     if (this.finalized) {
       logger.debug({ msg: "Stream.finalize skip - already finalized", streamId: this.streamId });
@@ -1555,8 +1676,9 @@ class DiscordMessageStream {
       logger.info({ msg: "Stream.finalize waiting for processing to complete", streamId: this.streamId });
       // Poll until processing completes (processPending sets processing=false in finally block)
       let waitCount = 0;
-      while (this.processing && waitCount < 100) { // Max 10 seconds
-        await new Promise(resolve => setTimeout(resolve, 100));
+      while (this.processing && waitCount < 100) {
+        // Max 10 seconds
+        await new Promise((resolve) => setTimeout(resolve, 100));
         waitCount++;
       }
       if (this.processing) {
@@ -1572,7 +1694,12 @@ class DiscordMessageStream {
     const remainingCount = this.pendingContent.length;
     if (remainingCount > 0) {
       const remaining = this.pendingContent.splice(0, this.pendingContent.length).join("");
-      logger.debug({ msg: "Stream.finalize processing remaining content", streamId: this.streamId, remainingCount, remainingLen: remaining.length });
+      logger.debug({
+        msg: "Stream.finalize processing remaining content",
+        streamId: this.streamId,
+        remainingCount,
+        remainingLen: remaining.length,
+      });
       if (remaining) {
         this.currentUnit.append(remaining);
         await this.flushWithOverflowHandling();
@@ -1580,9 +1707,17 @@ class DiscordMessageStream {
     }
 
     // Finalize current unit
-    logger.debug({ msg: "Stream.finalize finalizing current unit", streamId: this.streamId, unitContent: this.currentUnit.content.length });
+    logger.debug({
+      msg: "Stream.finalize finalizing current unit",
+      streamId: this.streamId,
+      unitContent: this.currentUnit.content.length,
+    });
     await this.currentUnit.finalize();
-    logger.info({ msg: "Stream.finalize complete", streamId: this.streamId, completedUnits: this.completedUnits.length + 1 });
+    logger.info({
+      msg: "Stream.finalize complete",
+      streamId: this.streamId,
+      completedUnits: this.completedUnits.length + 1,
+    });
   }
 
   /**
@@ -1712,25 +1847,26 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
   const { commandName } = interaction;
   const sessionKey = getSessionKeyFromInteraction(interaction);
   const state = getSessionState(sessionKey);
-  
+
   logger.info({ msg: "Slash command received", command: commandName, user: interaction.user.tag });
-  
+
   switch (commandName) {
     case "status": {
       const sessionInfo = await getSessionInfo(sessionKey);
       await interaction.reply({
-        content: `📊 **Session Status**\n\n` +
+        content:
+          `📊 **Session Status**\n\n` +
           `**Session:** ${sessionKey}\n` +
           `**Thinking Level:** ${state.thinkingLevel}\n` +
           `**Verbose Mode:** ${state.verbose ? "On" : "Off"}\n` +
           `**Usage Tracking:** ${state.usageMode}\n` +
           `**Messages:** ${state.messageCount}\n` +
           `${sessionInfo}`,
-        ephemeral: true
+        ephemeral: true,
       });
       break;
     }
-    
+
     case "new":
     case "reset": {
       // Reset the session state (thinking level, verbose mode, etc.)
@@ -1738,15 +1874,15 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       sessionStates.delete(sessionKey);
       await interaction.reply({
         content: "🔄 **Session Reset**\n\nStarting fresh! Your conversation history has been cleared.",
-        ephemeral: false
+        ephemeral: false,
       });
       break;
     }
-    
+
     case "compact": {
       await interaction.reply({
         content: "📦 **Compacting Session**\n\nTriggering context compaction...",
-        ephemeral: false
+        ephemeral: false,
       });
 
       try {
@@ -1760,7 +1896,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
             if (msg.type === "system" && msg.subtype === "compact_boundary" && msg.metadata) {
               compactMetadata = msg.metadata as { pre_tokens?: number; trigger?: string };
             }
-          }
+          },
         });
 
         // Build response with metadata if available
@@ -1775,63 +1911,64 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
         }
 
         await interaction.editReply(response);
-      } catch (e) {
+      } catch (_e) {
         await interaction.editReply("❌ Failed to compact session.");
       }
       break;
     }
-    
+
     case "think": {
       const level = interaction.options.getString("level", true);
       state.thinkingLevel = level;
       const levelEmoji = { off: "🛑", minimal: "💡", low: "🤔", medium: "🧠", high: "🔬", xhigh: "🔮" }[level] || "🧠";
       await interaction.reply({
         content: `${levelEmoji} **Thinking level set to:** ${level}`,
-        ephemeral: true
+        ephemeral: true,
       });
       break;
     }
-    
+
     case "verbose": {
       const enabled = interaction.options.getBoolean("enabled", true);
       state.verbose = enabled;
       await interaction.reply({
         content: enabled ? "🔊 **Verbose mode enabled**" : "🔇 **Verbose mode disabled**",
-        ephemeral: true
+        ephemeral: true,
       });
       break;
     }
-    
+
     case "usage": {
       const mode = interaction.options.getString("mode", true);
       state.usageMode = mode;
       await interaction.reply({
         content: `📈 **Usage tracking set to:** ${mode}`,
-        ephemeral: true
+        ephemeral: true,
       });
       break;
     }
-    
+
     case "session": {
       const name = interaction.options.getString("name", true);
       const baseKey = getSessionKeyFromInteraction(interaction);
       const newSessionKey = `${baseKey}/${name}`;
       await interaction.reply({
         content: `💬 **Switched to session:** ${newSessionKey}\n\nNote: Each session maintains separate context.`,
-        ephemeral: false
+        ephemeral: false,
       });
       break;
     }
-    
+
     case "wopr": {
       const message = interaction.options.getString("message", true);
       await handleWoprMessage(interaction, message);
       break;
     }
-    
+
     case "help": {
       await interaction.reply({
-        content: `**🤖 WOPR Discord Commands**\n\n` +
+        content:
+          `**🤖 WOPR Discord Commands**\n\n` +
           `**/status** - Show session status\n` +
           `**/new** or **/reset** - Start fresh session\n` +
           `**/compact** - Summarize conversation\n` +
@@ -1845,7 +1982,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
           `**/claim <code>** - Claim bot ownership (DM only)\n` +
           `**/help** - Show this help\n\n` +
           `You can also mention me (@${client.user?.username}) to chat!`,
-        ephemeral: true
+        ephemeral: true,
       });
       break;
     }
@@ -1855,7 +1992,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       if (interaction.channel?.type !== 1) {
         await interaction.reply({
           content: "❌ The /claim command only works in DMs. Please DM me to claim ownership.",
-          ephemeral: true
+          ephemeral: true,
         });
         break;
       }
@@ -1864,7 +2001,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       if (hasOwner(ctx)) {
         await interaction.reply({
           content: "❌ This bot already has an owner configured.",
-          ephemeral: true
+          ephemeral: true,
         });
         break;
       }
@@ -1874,17 +2011,18 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
 
       if (result.success) {
         await interaction.reply({
-          content: `✅ **Ownership claimed!**\n\nYou are now the owner of this bot.\n\n` +
+          content:
+            `✅ **Ownership claimed!**\n\nYou are now the owner of this bot.\n\n` +
             `**User ID:** ${result.userId}\n` +
             `**Username:** ${result.username}\n\n` +
             `You will receive private notifications for friend requests and other owner-only features.`,
-          ephemeral: false
+          ephemeral: false,
         });
         logger.info({ msg: "Bot ownership claimed", userId: result.userId, username: result.username });
       } else {
         await interaction.reply({
           content: `❌ **Claim failed:** ${result.error}\n\nMake sure you're using the correct code and it hasn't expired.`,
-          ephemeral: true
+          ephemeral: true,
         });
       }
       break;
@@ -1914,12 +2052,12 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
         }
         await interaction.reply({
           content: msg,
-          ephemeral: false
+          ephemeral: false,
         });
       } else {
         await interaction.reply({
           content: "ℹ️ **Nothing to cancel**\n\nNo response is currently in progress.",
-          ephemeral: true
+          ephemeral: true,
         });
       }
       break;
@@ -1932,12 +2070,13 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       const resolved = resolveModel(modelChoice);
       if (!resolved) {
         const models = getAllModels();
-        const list = models.length > 0
-          ? models.map(m => `\`${m.id}\` — ${m.name}`).join("\n")
-          : "_No models discovered yet. Try again in a moment._";
+        const list =
+          models.length > 0
+            ? models.map((m) => `\`${m.id}\` — ${m.name}`).join("\n")
+            : "_No models discovered yet. Try again in a moment._";
         await interaction.reply({
           content: `❌ Unknown model: \`${modelChoice}\`\n\n**Available models:**\n${list}`,
-          ephemeral: true
+          ephemeral: true,
         });
         break;
       }
@@ -1949,23 +2088,23 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
         if (ctx.setSessionProvider) {
           await ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
         } else {
-          const { exec } = await import("child_process");
-          const { promisify } = await import("util");
+          const { exec } = await import("node:child_process");
+          const { promisify } = await import("node:util");
           const execAsync = promisify(exec);
           await execAsync(
-            `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`
+            `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`,
           );
         }
 
         await interaction.reply({
           content: `🔄 **Model switched to:** ${resolved.name} (\`${resolved.id}\`)\n\nAll future responses will use this model.`,
-          ephemeral: false
+          ephemeral: false,
         });
       } catch (e) {
         logger.error({ msg: "Failed to switch model", error: String(e) });
         await interaction.reply({
           content: `❌ Failed to switch model: ${e}`,
-          ephemeral: true
+          ephemeral: true,
         });
       }
       break;
@@ -1986,7 +2125,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
               try {
                 const user = await client.users.fetch(mentionMatch[1]);
                 if (user) {
-                  value = user.username;  // Use the actual username
+                  value = user.username; // Use the actual username
                   logger.info({ msg: "Resolved mention to username", original: String(option.value), resolved: value });
                 }
               } catch (err) {
@@ -2039,7 +2178,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
   }
 }
 
-async function getSessionInfo(sessionKey: string): Promise<string> {
+async function getSessionInfo(_sessionKey: string): Promise<string> {
   // This would integrate with WOPR session API
   return "💾 Session active";
 }
@@ -2062,27 +2201,26 @@ async function handleWoprMessage(interaction: ChatInputCommandInteraction, messa
 
   // Note: Slash commands use direct interaction.editReply() - no stream needed
   // For slash commands, we use a simple buffer since we edit the deferred reply
-  let responseBuffer = "";
-  let lastEditLength = 0;
+  let _responseBuffer = "";
+  const _lastEditLength = 0;
 
   try {
     const response = await ctx.inject(sessionKey, fullMessage, {
       from: interaction.user.username,
       channel: { type: "discord", id: interaction.channelId, name: "slash-command" },
       // Skip conversation_history and channel_history - Discord handles its own context
-      contextProviders: ['session_system', 'skills', 'bootstrap_files'],
+      contextProviders: ["session_system", "skills", "bootstrap_files"],
       onStream: (msg: StreamMessage) => {
         // Collect response for editing
         if (msg.type === "text" && msg.content) {
-          responseBuffer += msg.content;
+          _responseBuffer += msg.content;
         }
-      }
+      },
     });
 
     // Final edit with complete response
     const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
     await interaction.editReply((response + usage).slice(0, DISCORD_LIMIT));
-
   } catch (error: any) {
     logger.error({ msg: "Slash command inject failed", error: String(error) });
     await interaction.editReply("❌ Error processing your request.");
@@ -2100,7 +2238,7 @@ async function handleMessage(message: Message) {
   // Check for registered message parsers FIRST - they need to see ALL messages
   // including slash command responses (which contain FRIEND_REQUEST/ACCEPT)
   if (await handleRegisteredParsers(message)) {
-    return;  // Parser handled
+    return; // Parser handled
   }
 
   // Ignore slash command interactions (for everything else)
@@ -2119,7 +2257,7 @@ async function handleMessage(message: Message) {
 
   // Check for registered channel commands (e.g., /friend from P2P plugin)
   if (await handleRegisteredCommand(message)) {
-    return;  // Command handled
+    return; // Command handled
   }
 
   // Note: Message parsers already checked above (before interaction check)
@@ -2129,7 +2267,8 @@ async function handleMessage(message: Message) {
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
   const isBot = message.author.bot;
 
-  const authorDisplayName = message.member?.displayName || (message.author as any).displayName || message.author.username;
+  const authorDisplayName =
+    message.member?.displayName || (message.author as any).displayName || message.author.username;
 
   // DEBUG: Log what Discord.js is giving us for author info
   logger.info({
@@ -2152,9 +2291,9 @@ async function handleMessage(message: Message) {
   try {
     ctx.logMessage(sessionKey, resolvedContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (message.channel as any).name }
+      channel: { type: "discord", id: channelId, name: (message.channel as any).name },
     });
-  } catch (e) {}
+  } catch (_e) {}
 
   // Add ALL messages to our buffer (for context building)
   addToBuffer(channelId, {
@@ -2163,7 +2302,7 @@ async function handleMessage(message: Message) {
     timestamp: Date.now(),
     isBot,
     isMention: isDirectlyMentioned,
-    originalMessage: message
+    originalMessage: message,
   });
 
   // === BOT MESSAGE HANDLING ===
@@ -2174,7 +2313,7 @@ async function handleMessage(message: Message) {
     let messageContent = resolvedContent;
     // Remove bot's own @mention from the message
     const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-    messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
+    messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
 
     if (!messageContent) return; // Ignore empty bot mentions
 
@@ -2189,7 +2328,7 @@ async function handleMessage(message: Message) {
       authorDisplayName,
       replyToMessage: message,
       isBot: true,
-      queuedAt: Date.now()
+      queuedAt: Date.now(),
     });
     logger.info({ msg: "Bot @mention queued", channelId, botId: message.author.id, authorDisplayName });
     return;
@@ -2207,14 +2346,14 @@ async function handleMessage(message: Message) {
     if (client.user && isDirectlyMentioned) {
       // Remove bot's own @mention from the message
       const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-      messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, 'gi'), "").trim();
+      messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
     }
 
     // Handle attachments - save to disk and append paths
     if (message.attachments.size > 0) {
       const attachmentPaths = await saveAttachments(message);
       if (attachmentPaths.length > 0) {
-        const attachmentInfo = attachmentPaths.map(p => `[Attachment: ${p}]`).join("\n");
+        const attachmentInfo = attachmentPaths.map((p) => `[Attachment: ${p}]`).join("\n");
         messageContent = messageContent ? `${messageContent}\n\n${attachmentInfo}` : attachmentInfo;
         logger.info({ msg: "Attachments appended to message", count: attachmentPaths.length, channelId });
       }
@@ -2238,7 +2377,7 @@ async function handleMessage(message: Message) {
       authorDisplayName,
       replyToMessage: message,
       isBot: false,
-      queuedAt: Date.now()
+      queuedAt: Date.now(),
     });
     return;
   }
@@ -2289,7 +2428,7 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
   // Create new stream for THIS specific message
   const stream = new DiscordMessageStream(
     replyToMessage.channel as TextChannel | ThreadChannel | DMChannel,
-    replyToMessage
+    replyToMessage,
   );
   streams.set(streamKey, stream);
 
@@ -2305,7 +2444,7 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
       from: authorDisplayName,
       channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
       // Skip conversation_history and channel_history - Discord handles its own context buffer
-      contextProviders: ['session_system', 'skills', 'bootstrap_files'],
+      contextProviders: ["session_system", "skills", "bootstrap_files"],
       onStream: (msg: StreamMessage) => {
         // Check cancellation during streaming
         if (cancelToken.cancelled) return;
@@ -2313,7 +2452,7 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
         tickTyping(channelId);
         // Use streamKey (message ID) not sessionKey to route chunks to correct stream
         handleChunk(msg, streamKey).catch((e) => logger.error({ msg: "Chunk error", streamKey, error: String(e) }));
-      }
+      },
     });
     logger.info({ msg: "executeInjectInternal - inject complete", sessionKey, streamKey });
 
@@ -2329,10 +2468,12 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
 
     // Clear buffer after successful response
     clearBuffer(channelId);
-
   } catch (error: any) {
     const errorStr = String(error);
-    const isCancelled = cancelToken.cancelled || errorStr.toLowerCase().includes("cancelled") || errorStr.toLowerCase().includes("canceled");
+    const isCancelled =
+      cancelToken.cancelled ||
+      errorStr.toLowerCase().includes("cancelled") ||
+      errorStr.toLowerCase().includes("canceled");
 
     // Stop typing indicator (pass channel to force-clear Discord's typing state)
     stopTyping(channelId, channel);
@@ -2343,14 +2484,14 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
         await stream.finalize();
         streams.delete(streamKey);
         await setMessageReaction(replyToMessage, REACTION_CANCELLED);
-      } catch (e) {}
+      } catch (_e) {}
     } else {
       logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, streamKey, error: errorStr });
       try {
         await stream.finalize();
         streams.delete(streamKey);
         await setMessageReaction(replyToMessage, REACTION_ERROR);
-      } catch (e) {}
+      } catch (_e) {}
     }
   }
 }
@@ -2358,23 +2499,17 @@ async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelle
 // Register slash commands
 async function registerSlashCommands(token: string, clientId: string, guildId?: string) {
   const rest = new REST({ version: "10" }).setToken(token);
-  
+
   try {
     logger.info("Registering slash commands...");
-    
+
     if (guildId) {
       // Register to specific guild (faster for development)
-      await rest.put(
-        Routes.applicationGuildCommands(clientId, guildId),
-        { body: commands.map(cmd => cmd.toJSON()) }
-      );
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands.map((cmd) => cmd.toJSON()) });
       logger.info(`Registered ${commands.length} commands to guild ${guildId}`);
     } else {
       // Register globally (can take up to 1 hour to propagate)
-      await rest.put(
-        Routes.applicationCommands(clientId),
-        { body: commands.map(cmd => cmd.toJSON()) }
-      );
+      await rest.put(Routes.applicationCommands(clientId), { body: commands.map((cmd) => cmd.toJSON()) });
       logger.info(`Registered ${commands.length} global commands`);
     }
   } catch (error) {
@@ -2409,7 +2544,12 @@ const plugin: WOPRPlugin = {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ code }),
             });
-            const result = await response.json() as { success?: boolean; userId?: string; username?: string; error?: string };
+            const result = (await response.json()) as {
+              success?: boolean;
+              userId?: string;
+              username?: string;
+              error?: string;
+            };
 
             if (result.success) {
               console.log(`✓ Discord ownership claimed!`);
@@ -2419,7 +2559,7 @@ const plugin: WOPRPlugin = {
               console.log(`Failed to claim: ${result.error || "Unknown error"}`);
               process.exit(1);
             }
-          } catch (err) {
+          } catch (_err) {
             console.log(`Error: Could not connect to WOPR daemon. Is it running?`);
             console.log(`  Start it with: wopr daemon start`);
             process.exit(1);
@@ -2483,14 +2623,19 @@ const plugin: WOPRPlugin = {
         try {
           // Send the notification message directly to get the Message object back
           const channel = await client.channels.fetch(channelId);
-          if (!channel || !channel.isTextBased() || !('send' in channel)) {
+          if (!channel || !channel.isTextBased() || !("send" in channel)) {
             logger.warn({ msg: "Channel not sendable for streaming", session: payload.session, channelId });
             return;
           }
           const notificationMsg = await (channel as TextChannel | ThreadChannel | DMChannel).send(
-            `**[${sourceLabel}]** ${payload.message.slice(0, 1900)}`
+            `**[${sourceLabel}]** ${payload.message.slice(0, 1900)}`,
           );
-          logger.info({ msg: "Sent inject notification, creating stream", session: payload.session, channelId, msgId: notificationMsg.id });
+          logger.info({
+            msg: "Sent inject notification, creating stream",
+            session: payload.session,
+            channelId,
+            msgId: notificationMsg.id,
+          });
 
           // Clean up any stale stream for this session
           const existing = eventBusStreams.get(payload.session);
@@ -2500,13 +2645,15 @@ const plugin: WOPRPlugin = {
           }
 
           // Create a streaming collapser that replies to the notification message
-          const stream = new DiscordMessageStream(
-            channel as TextChannel | ThreadChannel | DMChannel,
-            notificationMsg
-          );
+          const stream = new DiscordMessageStream(channel as TextChannel | ThreadChannel | DMChannel, notificationMsg);
           eventBusStreams.set(payload.session, stream);
         } catch (err) {
-          logger.error({ msg: "Failed to set up streaming for inject", session: payload.session, channelId, error: String(err) });
+          logger.error({
+            msg: "Failed to set up streaming for inject",
+            session: payload.session,
+            channelId,
+            error: String(err),
+          });
         }
       });
 
@@ -2523,10 +2670,19 @@ const plugin: WOPRPlugin = {
           // created in beforeInject never receives content via ctx.on("stream").
           // Deliver the full response here instead.
           if (payload.response) {
-            logger.info({ msg: "Delivering inject response to Discord stream", session: payload.session, from: payload.from, responseLen: payload.response.length });
+            logger.info({
+              msg: "Delivering inject response to Discord stream",
+              session: payload.session,
+              from: payload.from,
+              responseLen: payload.response.length,
+            });
             stream.append(payload.response);
           } else {
-            logger.warn({ msg: "afterInject: no response content to deliver", session: payload.session, from: payload.from });
+            logger.warn({
+              msg: "afterInject: no response content to deliver",
+              session: payload.session,
+              from: payload.from,
+            });
           }
           await stream.finalize().catch((err) => {
             logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
@@ -2540,7 +2696,11 @@ const plugin: WOPRPlugin = {
             try {
               await discordChannelProvider.send(channelId, payload.response);
             } catch (err) {
-              logger.error({ msg: "Failed to deliver response to Discord", session: payload.session, error: String(err) });
+              logger.error({
+                msg: "Failed to deliver response to Discord",
+                session: payload.session,
+                error: String(err),
+              });
             }
           }
         }
@@ -2564,7 +2724,11 @@ const plugin: WOPRPlugin = {
           logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
           eventBusStreams.delete(event.session);
           stream.finalize().catch((err) => {
-            logger.error({ msg: "Failed to finalize event bus stream on complete", session: event.session, error: String(err) });
+            logger.error({
+              msg: "Failed to finalize event bus stream on complete",
+              session: event.session,
+              error: String(err),
+            });
           });
           return;
         }
@@ -2603,9 +2767,9 @@ const plugin: WOPRPlugin = {
     }
 
     await refreshIdentity();
-    let config = ctx.getConfig<{token?: string; guildId?: string; clientId?: string}>();
+    let config = ctx.getConfig<{ token?: string; guildId?: string; clientId?: string }>();
     // Fall back to main config for Discord settings
-    const mainDiscordConfig = ctx.getMainConfig("discord") as {token?: string; clientId?: string; guildId?: string};
+    const mainDiscordConfig = ctx.getMainConfig("discord") as { token?: string; clientId?: string; guildId?: string };
     if (!config?.token && mainDiscordConfig?.token) {
       config = { ...config, token: mainDiscordConfig.token };
     }
@@ -2615,11 +2779,11 @@ const plugin: WOPRPlugin = {
     if (!config?.guildId && mainDiscordConfig?.guildId) {
       config = { ...config, guildId: mainDiscordConfig.guildId };
     }
-    if (!config?.token) { 
-      logger.warn("Not configured"); 
-      return; 
+    if (!config?.token) {
+      logger.warn("Not configured");
+      return;
     }
-    
+
     client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -2627,12 +2791,14 @@ const plugin: WOPRPlugin = {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMessageTyping  // For human typing detection
+        GatewayIntentBits.GuildMessageTyping, // For human typing detection
       ],
-      partials: [Partials.Channel, Partials.Message]  // Required for DMs
+      partials: [Partials.Channel, Partials.Message], // Required for DMs
     });
 
-    client.on(Events.MessageCreate, (m) => handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })));
+    client.on(Events.MessageCreate, (m) =>
+      handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })),
+    );
     client.on(Events.InteractionCreate, async (interaction) => {
       // Handle autocomplete for /model command
       if (interaction.isAutocomplete()) {
@@ -2640,32 +2806,34 @@ const plugin: WOPRPlugin = {
           const focused = interaction.options.getFocused().toLowerCase();
           const models = getAllModels();
           const filtered = models
-            .filter(m =>
-              m.id.includes(focused) ||
-              m.name.toLowerCase().includes(focused) ||
-              focused === ""
-            )
+            .filter((m) => m.id.includes(focused) || m.name.toLowerCase().includes(focused) || focused === "")
             .slice(0, 25); // Discord max 25 choices
-          await interaction.respond(
-            filtered.map(m => ({ name: `${m.name} (${m.id})`, value: m.id }))
-          );
+          await interaction.respond(filtered.map((m) => ({ name: `${m.name} (${m.id})`, value: m.id })));
         }
         return;
       }
 
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
-        await handleSlashCommand(interaction).catch(e => logger.error({ msg: "Command error", error: String(e) }));
+        await handleSlashCommand(interaction).catch((e) => logger.error({ msg: "Command error", error: String(e) }));
         return;
       }
 
       // Handle button interactions (friend request accept/deny)
       if (interaction.isButton() && isFriendRequestButton(interaction.customId)) {
         // Get P2P extension for friend request handling
-        const p2pExt = ctx?.getExtension?.("p2p") as {
-          acceptFriendRequest?: (from: string, pubkey: string, encryptPub: string, signature: string, channelId: string) => Promise<{ friend: any; acceptMessage: string }>;
-          denyFriendRequest?: (from: string, signature: string) => Promise<void>;
-        } | undefined;
+        const p2pExt = ctx?.getExtension?.("p2p") as
+          | {
+              acceptFriendRequest?: (
+                from: string,
+                pubkey: string,
+                encryptPub: string,
+                signature: string,
+                channelId: string,
+              ) => Promise<{ friend: any; acceptMessage: string }>;
+              denyFriendRequest?: (from: string, signature: string) => Promise<void>;
+            }
+          | undefined;
 
         await handleFriendButtonInteraction(
           interaction,
@@ -2679,7 +2847,7 @@ const plugin: WOPRPlugin = {
                 pending.requestPubkey,
                 pending.encryptPub,
                 pending.signature,
-                pending.channelId
+                pending.channelId,
               );
               logger.info({ msg: "Friend request accepted via button", from, friend: result.friend.name });
               return result.acceptMessage;
@@ -2696,8 +2864,8 @@ const plugin: WOPRPlugin = {
               await p2pExt.denyFriendRequest(from, pending?.signature || "");
             }
             logger.info({ msg: "Friend request denied via button", from });
-          }
-        ).catch(e => logger.error({ msg: "Button interaction error", error: String(e) }));
+          },
+        ).catch((e) => logger.error({ msg: "Button interaction error", error: String(e) }));
         return;
       }
     });
@@ -2735,9 +2903,10 @@ const plugin: WOPRPlugin = {
           logger.info({ msg: "Session create for Discord pattern", sessionName, guildName, channelName });
 
           // Find the guild
-          const guild = client?.guilds.cache.find(g =>
-            g.name.toLowerCase().replace(/\s+/g, "-") === guildName.toLowerCase() ||
-            g.name.toLowerCase() === guildName.toLowerCase()
+          const guild = client?.guilds.cache.find(
+            (g) =>
+              g.name.toLowerCase().replace(/\s+/g, "-") === guildName.toLowerCase() ||
+              g.name.toLowerCase() === guildName.toLowerCase(),
           );
 
           if (!guild) {
@@ -2746,9 +2915,8 @@ const plugin: WOPRPlugin = {
           }
 
           // Check if channel already exists
-          const existingChannel = guild.channels.cache.find(c =>
-            c.name.toLowerCase() === channelName.toLowerCase() &&
-            c.type === ChannelType.GuildText
+          const existingChannel = guild.channels.cache.find(
+            (c) => c.name.toLowerCase() === channelName.toLowerCase() && c.type === ChannelType.GuildText,
           );
 
           if (existingChannel) {
@@ -2757,9 +2925,8 @@ const plugin: WOPRPlugin = {
           }
 
           // Find WOPR category (or create one)
-          let woprCategory = guild.channels.cache.find(c =>
-            c.name.toLowerCase() === "wopr" &&
-            c.type === ChannelType.GuildCategory
+          let woprCategory = guild.channels.cache.find(
+            (c) => c.name.toLowerCase() === "wopr" && c.type === ChannelType.GuildCategory,
           );
 
           if (!woprCategory) {
@@ -2782,7 +2949,12 @@ const plugin: WOPRPlugin = {
               type: ChannelType.GuildText,
               parent: woprCategory.id,
             });
-            logger.info({ msg: "Created Discord channel for session", channelName, channelId: newChannel.id, sessionName });
+            logger.info({
+              msg: "Created Discord channel for session",
+              channelName,
+              channelId: newChannel.id,
+              sessionName,
+            });
           } catch (err) {
             logger.error({ msg: "Failed to create Discord channel", channelName, error: String(err) });
           }
@@ -2790,7 +2962,7 @@ const plugin: WOPRPlugin = {
         logger.info("Subscribed to session:create for auto-channel creation");
       }
     });
-    
+
     try {
       await client.login(config.token);
       logger.info("Discord bot started");
