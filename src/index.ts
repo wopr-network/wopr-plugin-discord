@@ -1,26 +1,28 @@
 /**
  * WOPR Discord Plugin - With Slash Commands
+ * Orchestrator: wires together extracted modules, handles message routing & event bus.
  */
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { pipeline } from "node:stream/promises";
 import {
   ChannelType,
-  type ChatInputCommandInteraction,
   Client,
-  DMChannel,
+  type DMChannel,
   Events,
   GatewayIntentBits,
   type Message,
   Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  TextChannel,
-  ThreadChannel,
+  type TextChannel,
+  type ThreadChannel,
 } from "discord.js";
-import winston from "winston";
+import { DiscordChannelProviderImpl } from "./channel-provider.js";
+import { ChannelQueueManager, type QueuedInject } from "./channel-queue.js";
+import {
+  findChannelIdFromConversationLog,
+  getSessionKey,
+  registerSlashCommands,
+  resolveMentions,
+  saveAttachments,
+} from "./discord-utils.js";
 import {
   cleanupExpiredButtonRequests,
   createFriendRequestButtons,
@@ -30,6 +32,9 @@ import {
   isFriendRequestButton,
   storePendingButtonRequest,
 } from "./friend-buttons.js";
+import { IdentityManager } from "./identity-manager.js";
+import { logger } from "./logger.js";
+import { StreamRegistry } from "./message-streaming.js";
 import {
   buildPairingMessage,
   claimPairingCode,
@@ -38,13 +43,9 @@ import {
   hasOwner,
   setOwner,
 } from "./pairing.js";
+import { ReactionManager } from "./reaction-manager.js";
+import { SlashCommandHandler } from "./slash-commands.js";
 import type {
-  AgentIdentity,
-  ChannelCommand,
-  ChannelCommandContext,
-  ChannelMessageContext,
-  ChannelMessageParser,
-  ChannelProvider,
   ConfigSchema,
   SessionCreateEvent,
   SessionInjectEvent,
@@ -54,584 +55,20 @@ import type {
   WOPRPlugin,
   WOPRPluginContext,
 } from "./types.js";
+import { TypingManager } from "./typing-manager.js";
 
-const consoleFormat = winston.format.printf((info) => {
-  const level = info.level;
-
-  // Try to extract message from various possible locations
-  let msg = "";
-  let errorStr = "";
-
-  // Case 1: info.message is a string
-  if (typeof info.message === "string") {
-    msg = info.message;
-  }
-  // Case 2: info.message is an object with msg property
-  else if (info.message && typeof info.message === "object") {
-    const msgObj = info.message as Record<string, unknown>;
-    if (typeof msgObj.msg === "string") {
-      msg = msgObj.msg;
-    }
-    if (typeof msgObj.error === "string") {
-      errorStr = ` - ${msgObj.error}`;
-    }
-    // If no msg property, stringify the whole object
-    if (!msg) {
-      try {
-        msg = JSON.stringify(msgObj);
-      } catch {
-        msg = "[unserializable object]";
-      }
-    }
-  }
-  // Case 3: Check top-level info for msg/error (Winston splat format)
-  else {
-    const topLevel = info as Record<string, unknown>;
-    if (typeof topLevel.msg === "string") {
-      msg = topLevel.msg;
-    }
-    if (typeof topLevel.error === "string") {
-      errorStr = ` - ${topLevel.error}`;
-    }
-  }
-
-  // Fallback: stringify the entire info object if we still have no message
-  if (!msg) {
-    try {
-      // Exclude metadata fields
-      const { level: _l, timestamp: _t, service: _s, ...rest } = info as Record<string, unknown>;
-      msg = Object.keys(rest).length > 0 ? JSON.stringify(rest) : "[empty message]";
-    } catch {
-      msg = "[unserializable]";
-    }
-  }
-
-  return `${level}: ${msg}${errorStr}`;
-});
-
-const logger = winston.createLogger({
-  level: "debug",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json(),
-  ),
-  defaultMeta: { service: "wopr-plugin-discord" },
-  transports: [
-    new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
-      level: "error",
-    }),
-    new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"),
-      level: "debug",
-    }),
-    new winston.transports.Console({
-      format: winston.format.combine(winston.format.colorize(), consoleFormat),
-      level: "warn",
-    }),
-  ],
-});
+// ============================================================================
+// Module-level refs (set in init, cleared in shutdown)
+// ============================================================================
 
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
-let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
-
-/**
- * Generate a readable session key from a Discord channel.
- * Format:
- * - Guild channels: discord:guildName:#channelName
- * - Threads: discord:guildName:#parentChannel/threadName
- * - DMs: discord:dm:username
- */
-function getSessionKey(channel: TextChannel | ThreadChannel | DMChannel): string {
-  // Sanitize name for use in session key (lowercase, replace spaces with -)
-  const sanitize = (name: string) =>
-    name
-      .toLowerCase()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9-_]/g, "");
-
-  if (channel.isDMBased()) {
-    // DM channel - use recipient username
-    const dm = channel as DMChannel;
-    const recipientName = dm.recipient?.username || "unknown";
-    return `discord:dm:${sanitize(recipientName)}`;
-  }
-
-  if (channel.isThread()) {
-    // Thread - include parent channel
-    const thread = channel as ThreadChannel;
-    const guildName = thread.guild?.name || "unknown";
-    const parentName = thread.parent?.name || "unknown";
-    return `discord:${sanitize(guildName)}:#${sanitize(parentName)}/${sanitize(thread.name)}`;
-  }
-
-  // Regular text channel
-  const textChannel = channel as TextChannel;
-  const guildName = textChannel.guild?.name || "unknown";
-  return `discord:${sanitize(guildName)}:#${sanitize(textChannel.name)}`;
-}
-
-/**
- * Get session key from interaction (for slash commands)
- */
-function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction): string {
-  const channel = interaction.channel;
-  if (channel && (channel instanceof TextChannel || channel instanceof ThreadChannel || channel instanceof DMChannel)) {
-    return getSessionKey(channel);
-  }
-  // Fallback to channel ID if we can't resolve the channel type
-  return `discord:${interaction.channelId}`;
-}
-
-/**
- * Resolve Discord mentions in message content to readable names.
- * Converts <@USER_ID> to @Username and <#CHANNEL_ID> to #channel-name
- */
-function resolveMentions(message: Message): string {
-  let content = message.content;
-
-  // Resolve user mentions: <@USER_ID> or <@!USER_ID> -> @Username [USER_ID]
-  // Include both display name for readability AND ID for when WOPR needs to mention back
-  for (const [userId, user] of message.mentions.users) {
-    const member = message.guild?.members.cache.get(userId);
-    const displayName = member?.displayName || user.displayName || user.username;
-    // Replace both <@ID> and <@!ID> formats with @Name [ID]
-    content = content.replace(new RegExp(`<@!?${userId}>`, "g"), `@${displayName} [${userId}]`);
-  }
-
-  // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
-  for (const [channelId, channel] of message.mentions.channels) {
-    const channelName = (channel as any).name || channelId;
-    content = content.replace(new RegExp(`<#${channelId}>`, "g"), `#${channelName} [${channelId}]`);
-  }
-
-  // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
-  for (const [roleId, role] of message.mentions.roles) {
-    content = content.replace(new RegExp(`<@&${roleId}>`, "g"), `@${role.name} [${roleId}]`);
-  }
-
-  return content;
-}
-
-/**
- * Find the Discord channel ID from a session's conversation log.
- * Looks for the most recent message with a Discord channel reference.
- */
-function findChannelIdFromConversationLog(sessionName: string): string | null {
-  const sessionsDir = process.env.WOPR_HOME ? path.join(process.env.WOPR_HOME, "sessions") : "/data/sessions";
-  const logPath = path.join(sessionsDir, `${sessionName}.conversation.jsonl`);
-
-  if (!existsSync(logPath)) {
-    logger.debug({ msg: "Conversation log not found", sessionName, logPath });
-    return null;
-  }
-
-  try {
-    const content = readFileSync(logPath, "utf-8");
-    const lines = content
-      .trim()
-      .split("\n")
-      .filter((l) => l);
-
-    // Search from most recent entry backwards for a Discord channel reference
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.channel?.type === "discord" && entry.channel?.id) {
-          logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
-          return entry.channel.id;
-        }
-      } catch {
-        // Skip malformed lines
-      }
-    }
-
-    logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
-    return null;
-  } catch (err) {
-    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
-    return null;
-  }
-}
-
-// Slash command definitions
-const commands = [
-  new SlashCommandBuilder().setName("status").setDescription("Show session status and configuration"),
-  new SlashCommandBuilder().setName("new").setDescription("Start a new session (reset conversation)"),
-  new SlashCommandBuilder().setName("reset").setDescription("Reset the current session (alias for /new)"),
-  new SlashCommandBuilder().setName("compact").setDescription("Compact session context (summarize conversation)"),
-  new SlashCommandBuilder()
-    .setName("think")
-    .setDescription("Set the thinking level for responses")
-    .addStringOption((option) =>
-      option
-        .setName("level")
-        .setDescription("Thinking level")
-        .setRequired(true)
-        .addChoices(
-          { name: "Off", value: "off" },
-          { name: "Minimal", value: "minimal" },
-          { name: "Low", value: "low" },
-          { name: "Medium", value: "medium" },
-          { name: "High", value: "high" },
-          { name: "Maximum", value: "xhigh" },
-        ),
-    ),
-  new SlashCommandBuilder()
-    .setName("verbose")
-    .setDescription("Toggle verbose mode")
-    .addBooleanOption((option) =>
-      option.setName("enabled").setDescription("Enable or disable verbose mode").setRequired(true),
-    ),
-  new SlashCommandBuilder()
-    .setName("usage")
-    .setDescription("Set usage tracking display")
-    .addStringOption((option) =>
-      option
-        .setName("mode")
-        .setDescription("Usage display mode")
-        .setRequired(true)
-        .addChoices(
-          { name: "Off", value: "off" },
-          { name: "Tokens only", value: "tokens" },
-          { name: "Full", value: "full" },
-        ),
-    ),
-  new SlashCommandBuilder()
-    .setName("session")
-    .setDescription("Switch to a different session")
-    .addStringOption((option) => option.setName("name").setDescription("Session name").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("wopr")
-    .setDescription("Send a message to WOPR")
-    .addStringOption((option) => option.setName("message").setDescription("Your message").setRequired(true)),
-  new SlashCommandBuilder().setName("help").setDescription("Show available commands and help"),
-  new SlashCommandBuilder()
-    .setName("claim")
-    .setDescription("Claim ownership of this bot with a pairing code (DM only)")
-    .addStringOption((option) =>
-      option.setName("code").setDescription("The pairing code you received").setRequired(true),
-    ),
-  new SlashCommandBuilder().setName("cancel").setDescription("Cancel the current AI response in progress"),
-  new SlashCommandBuilder()
-    .setName("model")
-    .setDescription("Switch the AI model for this session")
-    .addStringOption((option) =>
-      option
-        .setName("model")
-        .setDescription("Model name or ID (e.g. opus, haiku, gpt-5.2)")
-        .setRequired(true)
-        .setAutocomplete(true),
-    ),
-];
-
-// Get all available models from all registered providers
-// Returns { providerId, modelId, displayName } for each model
-interface ResolvedModel {
-  provider: string;
-  id: string;
-  name: string;
-}
-
-function getAllModels(): ResolvedModel[] {
-  const results: ResolvedModel[] = [];
-  // Get all registered providers via the plugin context
-  // Iterate known provider IDs from the registry
-  const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
-  for (const pid of providerIds) {
-    const provider = (ctx as any)?.getProvider?.(pid);
-    if (!provider?.supportedModels) continue;
-    for (const modelId of provider.supportedModels) {
-      results.push({
-        provider: pid,
-        id: modelId,
-        name: modelIdToDisplayName(modelId),
-      });
-    }
-  }
-  return results;
-}
-
-// Convert a model ID to a human-readable display name
-// "claude-opus-4-6" -> "Opus 4.6"
-// "claude-sonnet-4-5-20250929" -> "Sonnet 4.5"
-// "gpt-5.2" -> "GPT 5.2"
-// Unknown -> return as-is
-function modelIdToDisplayName(id: string): string {
-  // Claude models: claude-{tier}-{version}[-snapshot]
-  const claude = id.match(/^claude-(\w+)-(\d[\d.-]*)(?:-\d{8})?$/);
-  if (claude) {
-    const tier = claude[1].charAt(0).toUpperCase() + claude[1].slice(1);
-    const ver = claude[2].replace(/-/g, ".");
-    return `${tier} ${ver}`;
-  }
-  // GPT models
-  const gpt = id.match(/^gpt-(.+)$/i);
-  if (gpt) return `GPT ${gpt[1]}`;
-  // o-series (o1, o3, etc.)
-  const o = id.match(/^o(\d.*)$/);
-  if (o) return `o${o[1]}`;
-  return id;
-}
-
-// Resolve user input to a model - supports:
-// - Exact model ID: "claude-opus-4-6"
-// - Shortcut name: "opus", "haiku", "sonnet", "gpt"
-// - Partial match: "4.6", "codex"
-function resolveModel(input: string): { provider: string; id: string; name: string } | null {
-  const models = getAllModels();
-  if (models.length === 0) return null;
-
-  const q = input.toLowerCase().trim();
-
-  // Exact ID match
-  const exact = models.find((m) => m.id === q);
-  if (exact) return exact;
-
-  // Substring match on model ID
-  const partial = models.find((m) => m.id.includes(q));
-  if (partial) return partial;
-
-  // Substring match on display name
-  const byName = models.find((m) => m.name.toLowerCase().includes(q));
-  if (byName) return byName;
-
-  return null;
-}
-
-// Cache identity on init
-async function refreshIdentity() {
-  if (!ctx) return;
-  try {
-    const identity = await ctx.getAgentIdentity();
-    if (identity) {
-      agentIdentity = { ...agentIdentity, ...identity };
-      logger.info({ msg: "Identity refreshed", identity: agentIdentity });
-    }
-  } catch (e) {
-    logger.warn({ msg: "Failed to refresh identity", error: String(e) });
-  }
-  // Also refresh reaction emojis from config
-  await refreshReactionEmojis();
-}
-
-// Reaction emojis for message state - configurable via plugin settings
-let reactionEmojis = {
-  queued: "🕐",
-  active: "⚡",
-  done: "✅",
-  error: "❌",
-  cancelled: "⏹️",
-};
-
-function _getReactionEmoji(state: keyof typeof reactionEmojis): string {
-  return reactionEmojis[state];
-}
-
-async function refreshReactionEmojis(): Promise<void> {
-  if (!ctx) return;
-  try {
-    const config = ctx.getConfig<Record<string, any>>();
-    if (config) {
-      reactionEmojis = {
-        queued: config.emojiQueued || "🕐",
-        active: config.emojiActive || "⚡",
-        done: config.emojiDone || "✅",
-        error: config.emojiError || "❌",
-        cancelled: config.emojiCancelled || "⏹️",
-      };
-      logger.info({ msg: "Reaction emojis refreshed", emojis: reactionEmojis });
-    }
-  } catch (e) {
-    logger.warn({ msg: "Failed to refresh reaction emojis", error: String(e) });
-  }
-}
-
-// Convenience getters
-const REACTION_QUEUED = () => reactionEmojis.queued;
-const REACTION_ACTIVE = () => reactionEmojis.active;
-const REACTION_DONE = () => reactionEmojis.done;
-const REACTION_ERROR = () => reactionEmojis.error;
-const REACTION_CANCELLED = () => reactionEmojis.cancelled;
-
-function _getAckReaction(): string {
-  return agentIdentity.emoji?.trim() || "👀";
-}
-
-function _getMessagePrefix(): string {
-  const name = agentIdentity.name?.trim();
-  return name ? `[${name}]` : "[WOPR]";
-}
-
-/**
- * Set reaction state on a message. Removes old state reactions first.
- */
-async function setMessageReaction(message: Message, reaction: string | (() => string)): Promise<void> {
-  if (!client?.user) return;
-
-  const botId = client.user.id;
-  // Call functions to get current emoji values
-  const stateReactions = [
-    REACTION_QUEUED(),
-    REACTION_ACTIVE(),
-    REACTION_DONE(),
-    REACTION_ERROR(),
-    REACTION_CANCELLED(),
-  ];
-  const reactionValue = typeof reaction === "function" ? reaction() : reaction;
-
-  try {
-    // Remove any existing state reactions from us
-    for (const emoji of stateReactions) {
-      try {
-        const existingReaction = message.reactions.cache.get(emoji);
-        if (existingReaction?.users.cache.has(botId)) {
-          await existingReaction.users.remove(botId);
-        }
-      } catch (_e) {
-        // Ignore - reaction might not exist
-      }
-    }
-
-    // Add the new reaction
-    await message.react(reactionValue);
-  } catch (e) {
-    logger.debug({ msg: "Failed to set reaction", reaction: reactionValue, error: String(e) });
-  }
-}
-
-/**
- * Clear all state reactions from a message
- */
-async function clearMessageReactions(message: Message): Promise<void> {
-  if (!client?.user) return;
-
-  const botId = client.user.id;
-  // Call functions to get current emoji values
-  const stateReactions = [
-    REACTION_QUEUED(),
-    REACTION_ACTIVE(),
-    REACTION_DONE(),
-    REACTION_ERROR(),
-    REACTION_CANCELLED(),
-  ];
-
-  for (const emoji of stateReactions) {
-    try {
-      const existingReaction = message.reactions.cache.get(emoji);
-      if (existingReaction?.users.cache.has(botId)) {
-        await existingReaction.users.remove(botId);
-      }
-    } catch (_e) {
-      // Ignore
-    }
-  }
-}
+let channelProvider: DiscordChannelProviderImpl | null = null;
+let queueManager: ChannelQueueManager | null = null;
 
 // ============================================================================
-// Typing Indicator Manager - Shows "Bot is typing..." during processing
+// Config Schema
 // ============================================================================
-
-interface TypingState {
-  interval: NodeJS.Timeout | null;
-  lastActivity: number;
-  active: boolean;
-}
-
-const typingStates = new Map<string, TypingState>();
-const TYPING_REFRESH_MS = 8000; // Discord typing indicator lasts ~10s, refresh at 8s
-const TYPING_IDLE_TIMEOUT_MS = 5000; // Stop typing after 5s of no activity
-
-/**
- * Start showing typing indicator in a channel.
- * Will auto-refresh every 8 seconds until stopped.
- */
-async function startTyping(channel: TextChannel | ThreadChannel | DMChannel): Promise<void> {
-  const channelId = channel.id;
-
-  // Clean up any existing typing state
-  stopTyping(channelId);
-
-  const state: TypingState = {
-    interval: null,
-    lastActivity: Date.now(),
-    active: true,
-  };
-
-  // Send initial typing indicator
-  try {
-    await channel.sendTyping();
-    logger.debug({ msg: "Typing indicator started", channelId });
-  } catch (e) {
-    logger.debug({ msg: "Failed to start typing indicator", channelId, error: String(e) });
-    return;
-  }
-
-  // Set up refresh interval
-  state.interval = setInterval(async () => {
-    const now = Date.now();
-    const idleTime = now - state.lastActivity;
-
-    // Stop if idle for too long
-    if (idleTime > TYPING_IDLE_TIMEOUT_MS) {
-      logger.debug({ msg: "Typing indicator stopped (idle)", channelId, idleTime });
-      stopTyping(channelId);
-      return;
-    }
-
-    // Refresh typing indicator
-    if (state.active) {
-      try {
-        await channel.sendTyping();
-        logger.debug({ msg: "Typing indicator refreshed", channelId });
-      } catch (_e) {
-        // Channel might be gone, stop typing
-        stopTyping(channelId);
-      }
-    }
-  }, TYPING_REFRESH_MS);
-
-  typingStates.set(channelId, state);
-}
-
-/**
- * Update activity timestamp to prevent idle timeout.
- * Call this when receiving stream chunks.
- */
-function tickTyping(channelId: string): void {
-  const state = typingStates.get(channelId);
-  if (state) {
-    state.lastActivity = Date.now();
-  }
-}
-
-/**
- * Stop showing typing indicator in a channel.
- * Optionally pass the channel to force-clear Discord's typing state
- * (Discord has no "stop typing" API — the only way is to send and delete a message).
- */
-function stopTyping(channelId: string, channel?: TextChannel | ThreadChannel | DMChannel): void {
-  const state = typingStates.get(channelId);
-  if (state) {
-    state.active = false;
-    if (state.interval) {
-      clearInterval(state.interval);
-      state.interval = null;
-    }
-    typingStates.delete(channelId);
-    logger.debug({ msg: "Typing indicator stopped", channelId });
-  }
-
-  // Force-clear typing by sending and immediately deleting an invisible message
-  if (channel) {
-    channel
-      .send("\u200b")
-      .then((m: any) => m.delete().catch(() => {}))
-      .catch(() => {});
-  }
-}
 
 const configSchema: ConfigSchema = {
   title: "Discord Integration",
@@ -711,383 +148,10 @@ const configSchema: ConfigSchema = {
   ],
 };
 
-// Session state management per channel
-interface SessionState {
-  thinkingLevel: string;
-  verbose: boolean;
-  usageMode: string;
-  messageCount: number;
-  model: string;
-  lastBotInteraction?: Record<string, number>; // botId -> timestamp for cooldown
-}
-
-const sessionStates = new Map<string, SessionState>();
-
-function getSessionState(sessionKey: string): SessionState {
-  if (!sessionStates.has(sessionKey)) {
-    sessionStates.set(sessionKey, {
-      thinkingLevel: "medium",
-      verbose: false,
-      usageMode: "tokens",
-      messageCount: 0,
-      model: "claude-sonnet-4-20250514",
-    });
-  }
-  return sessionStates.get(sessionKey)!;
-}
-
 // ============================================================================
-// Channel Message Queue System - Promise chain for sequential message processing
+// Friend request notification (uses ctx, client, friend-button helpers)
 // ============================================================================
 
-interface BufferedMessage {
-  from: string;
-  content: string;
-  timestamp: number;
-  isBot: boolean;
-  isMention: boolean; // was this bot directly @mentioned?
-  originalMessage: Message;
-}
-
-interface QueuedInject {
-  sessionKey: string;
-  messageContent: string;
-  authorDisplayName: string;
-  replyToMessage: Message;
-  isBot: boolean;
-  queuedAt: number;
-  cooldownUntil?: number; // for bot messages only
-}
-
-interface ChannelQueue {
-  buffer: BufferedMessage[];
-  // Promise chain - each inject waits for the previous to complete
-  processingChain: Promise<void>;
-  // Pending items waiting to be added to chain (for bot cooldown/human typing)
-  pendingItems: QueuedInject[];
-  humanTypingUntil: number;
-  // Track if we're currently processing (for /cancel)
-  currentInject: { cancelled: boolean } | null;
-}
-
-const channelQueues = new Map<string, ChannelQueue>();
-const HUMAN_TYPING_WINDOW_MS = 15000; // 15s after human stops typing
-const BOT_COOLDOWN_MS = 5000; // 5s between bot responses
-
-function getChannelQueue(channelId: string): ChannelQueue {
-  if (!channelQueues.has(channelId)) {
-    channelQueues.set(channelId, {
-      buffer: [],
-      processingChain: Promise.resolve(),
-      pendingItems: [],
-      humanTypingUntil: 0,
-      currentInject: null,
-    });
-  }
-  return channelQueues.get(channelId)!;
-}
-
-function addToBuffer(channelId: string, msg: BufferedMessage) {
-  const queue = getChannelQueue(channelId);
-  queue.buffer.push(msg);
-  // Keep buffer reasonable size (last 20 messages)
-  if (queue.buffer.length > 20) {
-    queue.buffer.shift();
-  }
-  logger.info({
-    msg: "Buffer add",
-    channelId,
-    from: msg.from,
-    isBot: msg.isBot,
-    isMention: msg.isMention,
-    bufferSize: queue.buffer.length,
-  });
-}
-
-function getBufferContext(channelId: string): string {
-  const queue = getChannelQueue(channelId);
-  if (queue.buffer.length === 0) return "";
-
-  // Build context from buffer (exclude the triggering message itself)
-  const contextLines = queue.buffer.slice(0, -1).map((m) => `${m.from}: ${m.content}`);
-  if (contextLines.length === 0) return "";
-
-  return `[Recent conversation context]\n${contextLines.join("\n")}\n[End context]\n\n`;
-}
-
-function clearBuffer(channelId: string) {
-  const queue = getChannelQueue(channelId);
-  queue.buffer = [];
-}
-
-function _isHumanTyping(channelId: string): boolean {
-  const queue = getChannelQueue(channelId);
-  return Date.now() < queue.humanTypingUntil;
-}
-
-function setHumanTyping(channelId: string) {
-  const queue = getChannelQueue(channelId);
-  queue.humanTypingUntil = Date.now() + HUMAN_TYPING_WINDOW_MS;
-  logger.info({ msg: "Human typing detected", channelId, pauseUntil: new Date(queue.humanTypingUntil).toISOString() });
-}
-
-/**
- * Queue an inject to the promise chain.
- * Human messages go directly to chain. Bot messages wait for cooldown.
- */
-function queueInject(channelId: string, item: QueuedInject) {
-  const queue = getChannelQueue(channelId);
-
-  if (item.isBot) {
-    // Bot messages: add to pending with cooldown, processor will add to chain
-    item.cooldownUntil = Date.now() + BOT_COOLDOWN_MS;
-    queue.pendingItems.push(item);
-    // Show queued reaction
-    setMessageReaction(item.replyToMessage, REACTION_QUEUED).catch(() => {});
-    logger.info({
-      msg: "Bot inject queued (pending cooldown)",
-      channelId,
-      from: item.authorDisplayName,
-      queueSize: queue.pendingItems.length,
-    });
-  } else {
-    // Human messages: add directly to promise chain (immediate priority)
-    // Also clear any pending bot messages - human takes priority
-    if (queue.pendingItems.length > 0) {
-      logger.info({
-        msg: "Clearing pending bot messages - human priority",
-        channelId,
-        cleared: queue.pendingItems.length,
-      });
-      // Clear queued reactions from cancelled bot messages
-      for (const pending of queue.pendingItems) {
-        clearMessageReactions(pending.replyToMessage).catch(() => {});
-      }
-      queue.pendingItems = [];
-    }
-
-    // Check if there's already something processing - if so, show queued first
-    if (queue.currentInject) {
-      setMessageReaction(item.replyToMessage, REACTION_QUEUED).catch(() => {});
-    }
-
-    addToChain(channelId, item);
-    logger.info({ msg: "Human inject queued (direct to chain)", channelId, from: item.authorDisplayName });
-  }
-}
-
-/**
- * Add an inject to the promise chain - it will execute after all previous injects complete.
- */
-function addToChain(channelId: string, item: QueuedInject) {
-  const queue = getChannelQueue(channelId);
-
-  queue.processingChain = queue.processingChain.then(async () => {
-    // Check if cancelled before starting
-    if (queue.currentInject?.cancelled) {
-      logger.info({ msg: "Inject skipped - queue was cancelled", channelId, from: item.authorDisplayName });
-      return;
-    }
-
-    // Create cancellation token for this inject
-    const cancelToken = { cancelled: false };
-    queue.currentInject = cancelToken;
-
-    try {
-      await executeInjectInternal(item, cancelToken);
-    } catch (error) {
-      logger.error({ msg: "Chain inject failed", channelId, error: String(error) });
-    } finally {
-      // Clear current inject if it's still ours
-      if (queue.currentInject === cancelToken) {
-        queue.currentInject = null;
-      }
-    }
-  });
-}
-
-/**
- * Cancel current and pending injects for a channel.
- * Returns true if there was something to cancel.
- */
-function cancelChannelQueue(channelId: string): boolean {
-  const queue = getChannelQueue(channelId);
-  let hadSomething = false;
-
-  // Cancel current inject (reaction will be set by executeInjectInternal when it detects cancellation)
-  if (queue.currentInject) {
-    queue.currentInject.cancelled = true;
-    hadSomething = true;
-    logger.info({ msg: "Current inject cancelled", channelId });
-  }
-
-  // Clear pending items and set cancelled reaction on each
-  if (queue.pendingItems.length > 0) {
-    hadSomething = true;
-    logger.info({ msg: "Pending items cleared", channelId, count: queue.pendingItems.length });
-    for (const item of queue.pendingItems) {
-      setMessageReaction(item.replyToMessage, REACTION_CANCELLED).catch(() => {});
-    }
-    queue.pendingItems = [];
-  }
-
-  // Reset the chain to resolved (don't wait for cancelled items)
-  queue.processingChain = Promise.resolve();
-
-  return hadSomething;
-}
-
-/**
- * Get count of pending items in queue (for status display)
- */
-function getQueuedCount(channelId: string): number {
-  const queue = getChannelQueue(channelId);
-  return queue.pendingItems.length + (queue.currentInject ? 1 : 0);
-}
-
-// Check and fire pending bot responses (called periodically)
-async function processPendingBotResponses() {
-  const now = Date.now();
-
-  for (const [channelId, queue] of channelQueues.entries()) {
-    // Skip if no pending items
-    if (queue.pendingItems.length === 0) continue;
-
-    // Skip if human is typing
-    if (now < queue.humanTypingUntil) continue;
-
-    // Find items ready to fire (past cooldown)
-    const readyItems: QueuedInject[] = [];
-    const stillPending: QueuedInject[] = [];
-
-    for (const item of queue.pendingItems) {
-      if (item.cooldownUntil && now < item.cooldownUntil) {
-        stillPending.push(item);
-      } else {
-        readyItems.push(item);
-      }
-    }
-
-    queue.pendingItems = stillPending;
-
-    // Add ready items to chain
-    for (const item of readyItems) {
-      logger.info({ msg: "Moving pending item to chain", channelId, from: item.authorDisplayName });
-      addToChain(channelId, item);
-    }
-  }
-}
-
-// Start periodic check for pending responses
-let queueProcessorInterval: NodeJS.Timeout | null = null;
-let cleanupInterval: NodeJS.Timeout | null = null;
-
-function startQueueProcessor() {
-  if (queueProcessorInterval) return;
-  queueProcessorInterval = setInterval(() => {
-    processPendingBotResponses().catch((err) => logger.error({ msg: "Queue processor error", error: String(err) }));
-  }, 1000); // Check every second
-  logger.info({ msg: "Queue processor started" });
-}
-
-function startCleanupInterval() {
-  if (cleanupInterval) return;
-  // Clean up expired pairings and button requests every minute
-  cleanupInterval = setInterval(() => {
-    cleanupExpiredPairings();
-    cleanupExpiredButtonRequests();
-  }, 60000);
-  logger.info({ msg: "Cleanup interval started" });
-}
-
-function stopQueueProcessor() {
-  if (queueProcessorInterval) {
-    clearInterval(queueProcessorInterval);
-    queueProcessorInterval = null;
-    logger.info({ msg: "Queue processor stopped" });
-  }
-  if (cleanupInterval) {
-    clearInterval(cleanupInterval);
-    cleanupInterval = null;
-  }
-}
-
-// ============================================================================
-// Channel Provider Implementation
-// ============================================================================
-
-// Registered commands and parsers from other plugins (e.g., P2P friend commands)
-const registeredCommands: Map<string, ChannelCommand> = new Map();
-const registeredParsers: Map<string, ChannelMessageParser> = new Map();
-
-/**
- * Discord Channel Provider - allows other plugins to register commands and message parsers
- */
-const discordChannelProvider: ChannelProvider = {
-  id: "discord",
-
-  registerCommand(cmd: ChannelCommand): void {
-    registeredCommands.set(cmd.name, cmd);
-    logger.info({ msg: "Channel command registered", name: cmd.name });
-  },
-
-  unregisterCommand(name: string): void {
-    registeredCommands.delete(name);
-  },
-
-  getCommands(): ChannelCommand[] {
-    return Array.from(registeredCommands.values());
-  },
-
-  addMessageParser(parser: ChannelMessageParser): void {
-    registeredParsers.set(parser.id, parser);
-    logger.info({ msg: "Message parser registered", id: parser.id });
-  },
-
-  removeMessageParser(id: string): void {
-    registeredParsers.delete(id);
-  },
-
-  getMessageParsers(): ChannelMessageParser[] {
-    return Array.from(registeredParsers.values());
-  },
-
-  async send(channelId: string, content: string): Promise<void> {
-    if (!client) throw new Error("Discord client not initialized");
-    const channel = await client.channels.fetch(channelId);
-    if (channel?.isTextBased() && "send" in channel) {
-      // Split content into chunks of 2000 chars (Discord limit)
-      const chunks: string[] = [];
-      let remaining = content;
-      while (remaining.length > 0) {
-        if (remaining.length <= 2000) {
-          chunks.push(remaining);
-          break;
-        }
-        // Try to split at a newline or space near the limit
-        let splitAt = remaining.lastIndexOf("\n", 2000);
-        if (splitAt < 1500) splitAt = remaining.lastIndexOf(" ", 2000);
-        if (splitAt < 1500) splitAt = 2000;
-        chunks.push(remaining.slice(0, splitAt));
-        remaining = remaining.slice(splitAt).trimStart();
-      }
-      for (const chunk of chunks) {
-        if (chunk.trim()) {
-          await channel.send(chunk);
-        }
-      }
-    }
-  },
-
-  getBotUsername(): string {
-    return client?.user?.username || "unknown";
-  },
-};
-
-/**
- * Send a friend request notification to the owner with Accept/Deny buttons.
- * Returns true if notification was sent, false if no owner configured.
- */
 async function sendFriendRequestNotification(
   requestFrom: string,
   pubkey: string,
@@ -1105,22 +169,18 @@ async function sendFriendRequestNotification(
   }
 
   try {
-    // Fetch the owner user
     const owner = await client.users.fetch(config.ownerUserId);
     if (!owner) {
       logger.warn({ msg: "Could not fetch owner user", ownerUserId: config.ownerUserId });
       return false;
     }
 
-    // Store pending request for button handling
     storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
 
-    // Create the embed and buttons
     const pubkeyShort = `${pubkey.slice(0, 12)}...`;
     const embed = createFriendRequestEmbed(requestFrom, pubkeyShort, channelName);
     const buttons = createFriendRequestButtons(requestFrom);
 
-    // Send DM to owner
     await owner.send({
       embeds: [embed],
       components: [buttons],
@@ -1134,12 +194,14 @@ async function sendFriendRequestNotification(
   }
 }
 
-// Expose Discord extension to other plugins and CLI
+// ============================================================================
+// Discord extension (exposed to other plugins and CLI)
+// ============================================================================
+
 const discordExtension = {
   sendFriendRequestNotification,
   getBotUsername: () => client?.user?.username || "unknown",
 
-  // Pairing methods for CLI
   claimOwnership: async (
     code: string,
   ): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
@@ -1150,7 +212,6 @@ const discordExtension = {
       return { success: false, error: "Invalid or expired pairing code" };
     }
 
-    // Set the owner in config
     await setOwner(ctx, request.discordUserId);
 
     return {
@@ -1164,1067 +225,20 @@ const discordExtension = {
   getOwnerId: () => ctx?.getConfig<{ ownerUserId?: string }>()?.ownerUserId || null,
 };
 
-/**
- * Check if a message matches a registered command and handle it
- * Returns true if handled, false otherwise
- */
-async function handleRegisteredCommand(message: Message): Promise<boolean> {
-  const content = message.content.trim();
+// ============================================================================
+// Message handler (the main router — orchestrates all concerns)
+// ============================================================================
 
-  // Check for /command format
-  if (!content.startsWith("/")) return false;
-
-  const parts = content.slice(1).split(/\s+/);
-  const cmdName = parts[0].toLowerCase();
-  const args = parts.slice(1);
-
-  const cmd = registeredCommands.get(cmdName);
-  if (!cmd) return false;
-
-  const channelId = message.channelId;
-
-  const cmdCtx: ChannelCommandContext = {
-    channel: channelId,
-    channelType: "discord",
-    sender: message.author.username,
-    args,
-    reply: async (msg: string) => {
-      await message.reply(msg);
-    },
-    getBotUsername: () => client?.user?.username || "unknown",
-  };
-
-  try {
-    await cmd.handler(cmdCtx);
-    return true;
-  } catch (error) {
-    logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
-    await message.reply(`Error executing /${cmdName}: ${error}`);
-    return true; // Still handled, just with error
-  }
-}
-
-/**
- * Check if a message matches any registered parser and handle it
- * Returns true if handled, false otherwise
- */
-async function handleRegisteredParsers(message: Message): Promise<boolean> {
-  const content = message.content;
-  const channelId = message.channelId;
-
-  for (const parser of registeredParsers.values()) {
-    let matches = false;
-
-    if (typeof parser.pattern === "function") {
-      matches = parser.pattern(content);
-    } else {
-      matches = parser.pattern.test(content);
-    }
-
-    if (matches) {
-      const msgCtx: ChannelMessageContext = {
-        channel: channelId,
-        channelType: "discord",
-        sender: message.author.username,
-        content,
-        reply: async (msg: string) => {
-          await message.reply(msg);
-        },
-        getBotUsername: () => client?.user?.username || "unknown",
-      };
-
-      try {
-        await parser.handler(msgCtx);
-        return true;
-      } catch (error) {
-        logger.error({ msg: "Message parser error", id: parser.id, error: String(error) });
-        // Don't reply with error for parsers - they're silent watchers
-        return false;
-      }
-    }
-  }
-
-  return false;
-}
-
-// Discord streaming message handler with explicit state machine
-const DISCORD_LIMIT = 2000;
-const EDIT_INTERVAL_MS = 1000; // Max 1 edit per second (Discord rate limit: 5 req/5s per channel)
-const IDLE_SPLIT_MS = 3500;
-
-// Explicit state machine - each state is mutually exclusive
-type MessageState =
-  | { status: "buffering"; content: string }
-  | { status: "sending"; content: string; promise: Promise<Message> }
-  | { status: "sent"; content: string; discordMsg: Message; lastEditLength: number }
-  | { status: "finalized" };
-
-/**
- * Manages a single Discord message's lifecycle with edit-in-place support.
- * Uses explicit state machine to prevent race conditions.
- */
-class DiscordMessageUnit {
-  private state: MessageState = { status: "buffering", content: "" };
-  private readonly channel: TextChannel | ThreadChannel | DMChannel;
-  private readonly replyTo: Message;
-  private readonly isReply: boolean;
-  private readonly unitId: string;
-  private _overflow: string = ""; // Content that didn't fit after a split
-
-  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message, isReply: boolean) {
-    this.channel = channel;
-    this.replyTo = replyTo;
-    this.isReply = isReply;
-    this.unitId = Math.random().toString(36).slice(2, 8);
-    logger.debug({ msg: "DiscordMessageUnit created", unitId: this.unitId, isReply });
-  }
-
-  get content(): string {
-    if (this.state.status === "finalized") return "";
-    return this.state.content;
-  }
-
-  get isFinalized(): boolean {
-    return this.state.status === "finalized";
-  }
-
-  get discordMsg(): Message | null {
-    if (this.state.status === "sent") return this.state.discordMsg;
-    return null;
-  }
-
-  append(text: string): void {
-    if (this.state.status === "finalized") {
-      logger.debug({ msg: "Unit.append ignored - finalized", unitId: this.unitId, textLen: text.length });
-      return;
-    }
-    if (this.state.status === "sending") {
-      logger.debug({ msg: "Unit.append ignored - sending", unitId: this.unitId, textLen: text.length });
-      return;
-    }
-    const prevLen = this.state.content.length;
-    this.state = { ...this.state, content: this.state.content + text };
-    logger.debug({
-      msg: "Unit.append",
-      unitId: this.unitId,
-      added: text.length,
-      totalLen: this.state.content.length,
-      prevLen,
-    });
-  }
-
-  /**
-   * Attempt to flush content to Discord.
-   * Returns 'split' if content exceeded limit and needs continuation.
-   */
-  async flush(): Promise<"ok" | "split" | "skip"> {
-    if (this.state.status === "finalized") {
-      logger.debug({ msg: "Unit.flush skip - finalized", unitId: this.unitId });
-      return "skip";
-    }
-    if (this.state.status === "sending") {
-      logger.debug({ msg: "Unit.flush skip - sending", unitId: this.unitId });
-      return "skip";
-    }
-
-    const content = this.state.content.trim();
-    if (!content) {
-      logger.debug({ msg: "Unit.flush skip - empty", unitId: this.unitId });
-      return "skip";
-    }
-
-    logger.debug({ msg: "Unit.flush", unitId: this.unitId, status: this.state.status, contentLen: content.length });
-
-    // Handle overflow - need to split
-    if (content.length > DISCORD_LIMIT) {
-      logger.debug({ msg: "Unit.flush overflow", unitId: this.unitId, contentLen: content.length });
-      return this.handleOverflow(content);
-    }
-
-    // In buffering state - send initial message (any content is enough)
-    if (this.state.status === "buffering") {
-      return this.sendInitial(content);
-    }
-
-    // In sent state - edit with new content
-    if (this.state.status === "sent") {
-      if (content.length === this.state.lastEditLength) {
-        logger.debug({ msg: "Unit.flush skip - no new content", unitId: this.unitId });
-        return "skip";
-      }
-      return this.editExisting(content);
-    }
-
-    return "skip";
-  }
-
-  private async sendInitial(content: string): Promise<"ok" | "split" | "skip"> {
-    if (this.state.status !== "buffering") return "skip";
-
-    logger.debug({ msg: "Unit.sendInitial", unitId: this.unitId, contentLen: content.length, isReply: this.isReply });
-
-    // Transition: buffering → sending
-    const promise = this.isReply ? this.replyTo.reply(content) : this.channel.send(content);
-    this.state = { status: "sending", content, promise };
-
-    try {
-      const discordMsg = await promise;
-      // Transition: sending → sent
-      this.state = { status: "sent", content, discordMsg, lastEditLength: content.length };
-      logger.debug({ msg: "Unit.sendInitial success", unitId: this.unitId, msgId: discordMsg.id });
-      return "ok";
-    } catch (error) {
-      // Rollback to buffering on failure
-      this.state = { status: "buffering", content };
-      logger.error({ msg: "Unit.sendInitial failed", unitId: this.unitId, error: String(error) });
-      throw error;
-    }
-  }
-
-  private async editExisting(content: string): Promise<"ok" | "split" | "skip"> {
-    if (this.state.status !== "sent") return "skip";
-
-    logger.debug({ msg: "Unit.editExisting", unitId: this.unitId, contentLen: content.length });
-    await this.state.discordMsg.edit(content);
-    this.state = { ...this.state, content, lastEditLength: content.length };
-    logger.debug({ msg: "Unit.editExisting success", unitId: this.unitId });
-    return "ok";
-  }
-
-  private async handleOverflow(content: string): Promise<"ok" | "split" | "skip"> {
-    // Find a word boundary to split at (don't cut mid-word)
-    let splitAt = DISCORD_LIMIT;
-    const lastSpace = content.lastIndexOf(" ", DISCORD_LIMIT);
-    const lastNewline = content.lastIndexOf("\n", DISCORD_LIMIT);
-    const bestBreak = Math.max(lastSpace, lastNewline);
-    if (bestBreak > DISCORD_LIMIT * 0.75) {
-      splitAt = bestBreak;
-    }
-    const toSend = content.slice(0, splitAt);
-    const overflow = content.slice(splitAt).trimStart();
-    logger.debug({
-      msg: "Unit.handleOverflow",
-      unitId: this.unitId,
-      toSendLen: toSend.length,
-      overflowLen: overflow.length,
-      splitAt,
-    });
-
-    if (this.state.status === "buffering") {
-      // Send initial with truncated content
-      const promise = this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend);
-      this.state = { status: "sending", content: toSend, promise };
-
-      try {
-        await promise;
-        // Mark as finalized - overflow will be new message
-        this.state = { status: "finalized" };
-        logger.debug({ msg: "Unit.handleOverflow sent and finalized", unitId: this.unitId });
-      } catch (error) {
-        this.state = { status: "buffering", content };
-        logger.error({ msg: "Unit.handleOverflow failed", unitId: this.unitId, error: String(error) });
-        throw error;
-      }
-    } else if (this.state.status === "sent") {
-      await this.state.discordMsg.edit(toSend);
-      this.state = { status: "finalized" };
-      logger.debug({ msg: "Unit.handleOverflow edited and finalized", unitId: this.unitId });
-    }
-
-    // Store overflow so the stream can retrieve it
-    this._overflow = overflow;
-    return "split";
-  }
-
-  /** Get the overflow content from the last split. */
-  get overflow(): string {
-    return this._overflow;
-  }
-
-  /**
-   * Finalize this message - send/edit with final content.
-   * Safe to call multiple times.
-   */
-  async finalize(): Promise<void> {
-    logger.debug({
-      msg: "Unit.finalize called",
-      unitId: this.unitId,
-      status: this.state.status,
-      contentLen: this.state.status !== "finalized" ? this.state.content.length : 0,
-    });
-
-    if (this.state.status === "finalized") {
-      logger.debug({ msg: "Unit.finalize skip - already finalized", unitId: this.unitId });
-      return;
-    }
-
-    // Wait for any in-flight send to complete
-    if (this.state.status === "sending") {
-      logger.debug({ msg: "Unit.finalize waiting for send", unitId: this.unitId });
-      try {
-        const discordMsg = await this.state.promise;
-        this.state = {
-          status: "sent",
-          content: this.state.content,
-          discordMsg,
-          lastEditLength: this.state.content.length,
-        };
-        logger.debug({ msg: "Unit.finalize send completed", unitId: this.unitId, msgId: discordMsg.id });
-      } catch (error) {
-        logger.error({ msg: "Unit.finalize send failed", unitId: this.unitId, error: String(error) });
-        this.state = { status: "finalized" };
-        return;
-      }
-    }
-
-    const content = this.state.content.trim();
-    if (!content) {
-      logger.debug({ msg: "Unit.finalize skip - empty content", unitId: this.unitId });
-      this.state = { status: "finalized" };
-      return;
-    }
-
-    // Immediately mark as finalized to prevent races
-    const prevState = this.state;
-    this.state = { status: "finalized" };
-
-    try {
-      if (prevState.status === "sent") {
-        logger.debug({ msg: "Unit.finalize editing sent message", unitId: this.unitId, contentLen: content.length });
-        await prevState.discordMsg.edit(content.slice(0, DISCORD_LIMIT));
-        logger.debug({ msg: "Unit.finalize edit success", unitId: this.unitId });
-      } else if (prevState.status === "buffering") {
-        logger.debug({
-          msg: "Unit.finalize sending buffered content",
-          unitId: this.unitId,
-          contentLen: content.length,
-          isReply: this.isReply,
-        });
-        const msg = this.isReply
-          ? await this.replyTo.reply(content.slice(0, DISCORD_LIMIT))
-          : await this.channel.send(content.slice(0, DISCORD_LIMIT));
-        // Already finalized, but store reference if needed
-        (this as any)._finalMsg = msg;
-        logger.debug({ msg: "Unit.finalize send success", unitId: this.unitId, msgId: msg.id });
-      }
-    } catch (error) {
-      logger.error({ msg: "Unit.finalize failed", unitId: this.unitId, error: String(error) });
-    }
-  }
-}
-
-/**
- * Coordinates streaming of potentially multiple Discord messages.
- * Handles idle-split, overflow, and debounced flushing.
- */
-class DiscordMessageStream {
-  private currentUnit: DiscordMessageUnit;
-  private completedUnits: DiscordMessageUnit[] = [];
-  private readonly channel: TextChannel | ThreadChannel | DMChannel;
-  private readonly replyTo: Message;
-  private readonly streamId: string;
-
-  private lastAppendTime = Date.now();
-  private flushTimer: NodeJS.Timeout | null = null;
-  private pendingContent: string[] = [];
-  private processing = false;
-  private finalized = false;
-
-  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message) {
-    this.channel = channel;
-    this.replyTo = replyTo;
-    this.streamId = Math.random().toString(36).slice(2, 8);
-    this.currentUnit = new DiscordMessageUnit(channel, replyTo, true); // First message is reply
-    logger.info({ msg: "Stream created", streamId: this.streamId, channelId: channel.id });
-
-    // Start the 1-second flush interval — matches Discord's rate limit (5 req/5s per channel)
-    this.flushTimer = setInterval(() => this.processPending(), EDIT_INTERVAL_MS);
-  }
-
-  /** Re-send typing indicator after each edit (edits clear the typing state in Discord) */
-  private async refreshTyping(): Promise<void> {
-    try {
-      await this.channel.sendTyping();
-    } catch (_) {
-      /* channel gone, ignore */
-    }
-  }
-
-  /**
-   * Add content from a stream chunk.
-   */
-  append(text: string): void {
-    if (this.finalized) {
-      logger.debug({ msg: "Stream.append ignored - finalized", streamId: this.streamId, textLen: text.length });
-      return;
-    }
-    this.pendingContent.push(text);
-    logger.debug({
-      msg: "Stream.append",
-      streamId: this.streamId,
-      textLen: text.length,
-      pendingCount: this.pendingContent.length,
-    });
-  }
-
-  private async processPending(): Promise<void> {
-    if (this.processing || this.finalized || this.pendingContent.length === 0) {
-      return;
-    }
-    this.processing = true;
-
-    try {
-      // Drain all pending chunks into one batch, then flush ONCE
-      const batch = this.pendingContent.splice(0, this.pendingContent.length).join("");
-      if (!batch) return;
-
-      const now = Date.now();
-      const timeSinceLast = now - this.lastAppendTime;
-      this.lastAppendTime = now;
-
-      // Idle split: long pause with existing content → start new message
-      if (timeSinceLast > IDLE_SPLIT_MS && this.currentUnit.content.length > 0) {
-        logger.info({
-          msg: "Stream idle split",
-          streamId: this.streamId,
-          timeSinceLast,
-          unitContent: this.currentUnit.content.length,
-        });
-        await this.currentUnit.finalize();
-        this.completedUnits.push(this.currentUnit);
-        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
-      }
-
-      // Append entire batch at once, then flush once
-      this.currentUnit.append(batch);
-      await this.flushWithOverflowHandling();
-
-      // Re-send typing indicator — Discord clears it when we send/edit a message
-      if (!this.finalized) {
-        await this.refreshTyping();
-      }
-
-      logger.debug({ msg: "Stream.processPending complete", streamId: this.streamId, batchLen: batch.length });
-    } catch (error) {
-      logger.error({ msg: "Stream processing error", streamId: this.streamId, error: String(error) });
-    } finally {
-      this.processing = false;
-    }
-  }
-
-  /**
-   * Flush current unit, handling overflow by creating new units as needed.
-   */
-  private async flushWithOverflowHandling(): Promise<void> {
-    while (true) {
-      const currentContent = this.currentUnit.content;
-      const result = await this.currentUnit.flush();
-      logger.debug({
-        msg: "Stream.flushWithOverflowHandling result",
-        streamId: this.streamId,
-        result,
-        contentLen: currentContent.length,
-      });
-
-      if (result === "split") {
-        // Unit split at a word boundary and finalized - get the overflow it stored
-        const overflow = this.currentUnit.overflow;
-        logger.info({ msg: "Stream overflow split", streamId: this.streamId, overflowLen: overflow.length });
-        this.completedUnits.push(this.currentUnit);
-        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
-
-        if (overflow.length > 0) {
-          this.currentUnit.append(overflow);
-          // Continue loop to handle if overflow itself exceeds limit
-        } else {
-          break;
-        }
-      } else {
-        // 'ok' or 'skip' - no overflow, we're done
-        break;
-      }
-    }
-  }
-
-  /**
-   * Finalize the entire stream - flush any remaining content.
-   */
-  async finalize(): Promise<void> {
-    logger.info({
-      msg: "Stream.finalize called",
-      streamId: this.streamId,
-      finalized: this.finalized,
-      processing: this.processing,
-      pendingCount: this.pendingContent.length,
-    });
-
-    if (this.finalized) {
-      logger.debug({ msg: "Stream.finalize skip - already finalized", streamId: this.streamId });
-      return;
-    }
-
-    // Stop the flush interval (we'll process everything now)
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
-      logger.debug({ msg: "Stream.finalize stopped flush interval", streamId: this.streamId });
-    }
-
-    // Wait for any ongoing processing to complete
-    if (this.processing) {
-      logger.info({ msg: "Stream.finalize waiting for processing to complete", streamId: this.streamId });
-      // Poll until processing completes (processPending sets processing=false in finally block)
-      let waitCount = 0;
-      while (this.processing && waitCount < 100) {
-        // Max 10 seconds
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        waitCount++;
-      }
-      if (this.processing) {
-        logger.warn({ msg: "Stream.finalize timed out waiting for processing", streamId: this.streamId });
-      } else {
-        logger.debug({ msg: "Stream.finalize processing completed", streamId: this.streamId, waitCount });
-      }
-    }
-
-    this.finalized = true;
-
-    // Process any remaining pending content — batch into one append + flush
-    const remainingCount = this.pendingContent.length;
-    if (remainingCount > 0) {
-      const remaining = this.pendingContent.splice(0, this.pendingContent.length).join("");
-      logger.debug({
-        msg: "Stream.finalize processing remaining content",
-        streamId: this.streamId,
-        remainingCount,
-        remainingLen: remaining.length,
-      });
-      if (remaining) {
-        this.currentUnit.append(remaining);
-        await this.flushWithOverflowHandling();
-      }
-    }
-
-    // Finalize current unit
-    logger.debug({
-      msg: "Stream.finalize finalizing current unit",
-      streamId: this.streamId,
-      unitContent: this.currentUnit.content.length,
-    });
-    await this.currentUnit.finalize();
-    logger.info({
-      msg: "Stream.finalize complete",
-      streamId: this.streamId,
-      completedUnits: this.completedUnits.length + 1,
-    });
-  }
-
-  /**
-   * Get the last Discord message (for appending usage stats, etc.)
-   */
-  getLastMessage(): Message | null {
-    const msg = this.currentUnit.discordMsg;
-    logger.debug({ msg: "Stream.getLastMessage", streamId: this.streamId, hasMsg: !!msg });
-    return msg;
-  }
-}
-
-// Stream registry - one stream per MESSAGE (not session) to prevent race conditions
-// Key: Discord message ID that triggered the inject
-const streams = new Map<string, DiscordMessageStream>();
-
-// Event bus streams - for non-Discord-originated injects (cron, sessions_send, P2P, CLI)
-// Key: session name (e.g., "discord:misfits:#wopr-devops")
-// These stream responses through the same collapser as normal Discord messages
-const eventBusStreams = new Map<string, DiscordMessageStream>();
-
-/**
- * Handle an incoming stream chunk.
- * @param msg - The stream message chunk
- * @param streamKey - The Discord message ID (NOT session key) to prevent cross-message races
- */
-async function handleChunk(msg: StreamMessage, streamKey: string): Promise<void> {
-  const stream = streams.get(streamKey);
-  if (!stream) {
-    logger.warn({ msg: "handleChunk - no stream found", streamKey, msgType: msg.type });
-    return;
-  }
-
-  // Handle system messages (including auto-compaction notifications)
-  if (msg.type === "system" && msg.subtype === "compact_boundary") {
-    const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
-    logger.info({ msg: "handleChunk - auto-compaction detected", streamKey, metadata });
-
-    // Only notify for auto-compaction (not manual /compact which has its own handler)
-    if (metadata?.trigger === "auto") {
-      // Send a notification about auto-compaction
-      let notification = "📦 **Auto-Compaction**\n";
-      if (metadata.pre_tokens) {
-        notification += `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`;
-      } else {
-        notification += "Context has been automatically compressed";
-      }
-
-      // Append notification to the stream so it appears inline with the response
-      stream.append(`\n\n${notification}\n\n`);
-    }
-    return;
-  }
-
-  // Extract text content from various message formats
-  let textContent = "";
-  if (msg.type === "text" && msg.content) {
-    textContent = msg.content;
-    logger.debug({ msg: "handleChunk - text content", streamKey, contentLen: textContent.length });
-  } else if (msg.type === "assistant" && (msg as any).message?.content) {
-    const content = (msg as any).message.content;
-    if (Array.isArray(content)) {
-      textContent = content.map((c: any) => c.text || "").join("");
-    } else if (typeof content === "string") {
-      textContent = content;
-    }
-    logger.debug({ msg: "handleChunk - assistant content", streamKey, contentLen: textContent.length });
-  } else {
-    logger.debug({ msg: "handleChunk - skipping non-text", streamKey, msgType: msg.type });
-  }
-
-  if (textContent) {
-    stream.append(textContent);
-  }
-}
-
-// Attachments directory
-const ATTACHMENTS_DIR = existsSync("/data") ? "/data/attachments" : path.join(process.cwd(), "attachments");
-
-/**
- * Download and save message attachments to disk
- * Returns array of file paths
- */
-async function saveAttachments(message: Message): Promise<string[]> {
-  if (!message.attachments.size) return [];
-
-  // Ensure attachments directory exists
-  if (!existsSync(ATTACHMENTS_DIR)) {
-    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
-  }
-
-  const savedPaths: string[] = [];
-
-  for (const [, attachment] of message.attachments) {
-    try {
-      // Create unique filename: timestamp-originalname
-      const timestamp = Date.now();
-      const safeName = attachment.name?.replace(/[^a-zA-Z0-9._-]/g, "_") || "attachment";
-      const filename = `${timestamp}-${message.author.id}-${safeName}`;
-      const filepath = path.join(ATTACHMENTS_DIR, filename);
-
-      // Download the attachment
-      const response = await fetch(attachment.url);
-      if (!response.ok) {
-        logger.warn({ msg: "Failed to download attachment", url: attachment.url, status: response.status });
-        continue;
-      }
-
-      // Save to disk
-      const fileStream = createWriteStream(filepath);
-      await pipeline(response.body as any, fileStream);
-
-      savedPaths.push(filepath);
-      logger.info({ msg: "Attachment saved", filename, size: attachment.size, contentType: attachment.contentType });
-    } catch (err) {
-      logger.error({ msg: "Error saving attachment", name: attachment.name, error: String(err) });
-    }
-  }
-
-  return savedPaths;
-}
-
-// Handle slash commands
-async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
-  if (!ctx || !client) return;
-
-  const { commandName } = interaction;
-  const sessionKey = getSessionKeyFromInteraction(interaction);
-  const state = getSessionState(sessionKey);
-
-  logger.info({ msg: "Slash command received", command: commandName, user: interaction.user.tag });
-
-  switch (commandName) {
-    case "status": {
-      const sessionInfo = await getSessionInfo(sessionKey);
-      await interaction.reply({
-        content:
-          `📊 **Session Status**\n\n` +
-          `**Session:** ${sessionKey}\n` +
-          `**Thinking Level:** ${state.thinkingLevel}\n` +
-          `**Verbose Mode:** ${state.verbose ? "On" : "Off"}\n` +
-          `**Usage Tracking:** ${state.usageMode}\n` +
-          `**Messages:** ${state.messageCount}\n` +
-          `${sessionInfo}`,
-        ephemeral: true,
-      });
-      break;
-    }
-
-    case "new":
-    case "reset": {
-      // Reset the session state (thinking level, verbose mode, etc.)
-      // Note: Streams are keyed by message ID now, not session - nothing to clean up here
-      sessionStates.delete(sessionKey);
-      await interaction.reply({
-        content: "🔄 **Session Reset**\n\nStarting fresh! Your conversation history has been cleared.",
-        ephemeral: false,
-      });
-      break;
-    }
-
-    case "compact": {
-      await interaction.reply({
-        content: "📦 **Compacting Session**\n\nTriggering context compaction...",
-        ephemeral: false,
-      });
-
-      try {
-        let compactMetadata: { pre_tokens?: number; trigger?: string } | undefined;
-
-        // Inject the actual /compact command to trigger Claude Code's internal compaction
-        const result = await ctx.inject(sessionKey, "/compact", {
-          silent: true,
-          onStream: (msg: StreamMessage) => {
-            // Capture compact_boundary metadata if available
-            if (msg.type === "system" && msg.subtype === "compact_boundary" && msg.metadata) {
-              compactMetadata = msg.metadata as { pre_tokens?: number; trigger?: string };
-            }
-          },
-        });
-
-        // Build response with metadata if available
-        let response = "📦 **Session Compacted**\n\n";
-        if (compactMetadata) {
-          if (compactMetadata.pre_tokens) {
-            response += `Compressed from ~${Math.round(compactMetadata.pre_tokens / 1000)}k tokens\n`;
-          }
-          response += `Trigger: ${compactMetadata.trigger || "manual"}`;
-        } else {
-          response += result || "Context has been compacted.";
-        }
-
-        await interaction.editReply(response);
-      } catch (_e) {
-        await interaction.editReply("❌ Failed to compact session.");
-      }
-      break;
-    }
-
-    case "think": {
-      const level = interaction.options.getString("level", true);
-      state.thinkingLevel = level;
-      const levelEmoji = { off: "🛑", minimal: "💡", low: "🤔", medium: "🧠", high: "🔬", xhigh: "🔮" }[level] || "🧠";
-      await interaction.reply({
-        content: `${levelEmoji} **Thinking level set to:** ${level}`,
-        ephemeral: true,
-      });
-      break;
-    }
-
-    case "verbose": {
-      const enabled = interaction.options.getBoolean("enabled", true);
-      state.verbose = enabled;
-      await interaction.reply({
-        content: enabled ? "🔊 **Verbose mode enabled**" : "🔇 **Verbose mode disabled**",
-        ephemeral: true,
-      });
-      break;
-    }
-
-    case "usage": {
-      const mode = interaction.options.getString("mode", true);
-      state.usageMode = mode;
-      await interaction.reply({
-        content: `📈 **Usage tracking set to:** ${mode}`,
-        ephemeral: true,
-      });
-      break;
-    }
-
-    case "session": {
-      const name = interaction.options.getString("name", true);
-      const baseKey = getSessionKeyFromInteraction(interaction);
-      const newSessionKey = `${baseKey}/${name}`;
-      await interaction.reply({
-        content: `💬 **Switched to session:** ${newSessionKey}\n\nNote: Each session maintains separate context.`,
-        ephemeral: false,
-      });
-      break;
-    }
-
-    case "wopr": {
-      const message = interaction.options.getString("message", true);
-      await handleWoprMessage(interaction, message);
-      break;
-    }
-
-    case "help": {
-      await interaction.reply({
-        content:
-          `**🤖 WOPR Discord Commands**\n\n` +
-          `**/status** - Show session status\n` +
-          `**/new** or **/reset** - Start fresh session\n` +
-          `**/compact** - Summarize conversation\n` +
-          `**/think <level>** - Set thinking level (off/minimal/low/medium/high/xhigh)\n` +
-          `**/verbose <on/off>** - Toggle verbose mode\n` +
-          `**/usage <mode>** - Set usage tracking (off/tokens/full)\n` +
-          `**/model <model>** - Switch AI model (sonnet/opus/haiku)\n` +
-          `**/cancel** - Stop the current AI response\n` +
-          `**/session <name>** - Switch to named session\n` +
-          `**/wopr <message>** - Send message to WOPR\n` +
-          `**/claim <code>** - Claim bot ownership (DM only)\n` +
-          `**/help** - Show this help\n\n` +
-          `You can also mention me (@${client.user?.username}) to chat!`,
-        ephemeral: true,
-      });
-      break;
-    }
-
-    case "claim": {
-      // Only allow in DMs
-      if (interaction.channel?.type !== 1) {
-        await interaction.reply({
-          content: "❌ The /claim command only works in DMs. Please DM me to claim ownership.",
-          ephemeral: true,
-        });
-        break;
-      }
-
-      // Check if owner already set
-      if (hasOwner(ctx)) {
-        await interaction.reply({
-          content: "❌ This bot already has an owner configured.",
-          ephemeral: true,
-        });
-        break;
-      }
-
-      const code = interaction.options.getString("code", true);
-      const result = await discordExtension.claimOwnership(code);
-
-      if (result.success) {
-        await interaction.reply({
-          content:
-            `✅ **Ownership claimed!**\n\n` +
-            `You will receive private notifications for friend requests and other owner-only features.`,
-          ephemeral: true,
-        });
-        logger.info({ msg: "Bot ownership claimed" });
-      } else {
-        await interaction.reply({
-          content: `❌ **Claim failed:** ${result.error}\n\nMake sure you're using the correct code and it hasn't expired.`,
-          ephemeral: true,
-        });
-      }
-      break;
-    }
-
-    case "cancel": {
-      const channelId = interaction.channelId;
-
-      // Cancel the channel queue (current + pending)
-      // Note: Stream cleanup happens automatically in executeInjectInternal when it detects cancellation
-      const queueCancelled = cancelChannelQueue(channelId);
-
-      // Also try to cancel the injection via WOPR
-      let woprCancelled = false;
-      if (ctx.cancelInject) {
-        woprCancelled = ctx.cancelInject(sessionKey);
-      }
-
-      // Note: Streams are now keyed by message ID, not session. The stream for the cancelled
-      // message will be finalized by executeInjectInternal when it detects cancelToken.cancelled
-
-      const pendingCount = getQueuedCount(channelId);
-      if (queueCancelled || woprCancelled) {
-        let msg = "⏹️ **Cancelled**\n\nThe current response has been stopped.";
-        if (pendingCount > 0) {
-          msg += `\n\n_${pendingCount} queued message(s) also cleared._`;
-        }
-        await interaction.reply({
-          content: msg,
-          ephemeral: false,
-        });
-      } else {
-        await interaction.reply({
-          content: "ℹ️ **Nothing to cancel**\n\nNo response is currently in progress.",
-          ephemeral: true,
-        });
-      }
-      break;
-    }
-
-    case "model": {
-      const modelChoice = interaction.options.getString("model", true);
-
-      // Resolve input against all provider models
-      const resolved = resolveModel(modelChoice);
-      if (!resolved) {
-        const models = getAllModels();
-        const list =
-          models.length > 0
-            ? models.map((m) => `\`${m.id}\` — ${m.name}`).join("\n")
-            : "_No models discovered yet. Try again in a moment._";
-        await interaction.reply({
-          content: `❌ Unknown model: \`${modelChoice}\`\n\n**Available models:**\n${list}`,
-          ephemeral: true,
-        });
-        break;
-      }
-
-      state.model = resolved.id;
-
-      // Update the session's provider model
-      try {
-        if (ctx.setSessionProvider) {
-          await ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
-        } else {
-          const { exec } = await import("node:child_process");
-          const { promisify } = await import("node:util");
-          const execAsync = promisify(exec);
-          await execAsync(
-            `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`,
-          );
-        }
-
-        await interaction.reply({
-          content: `🔄 **Model switched to:** ${resolved.name} (\`${resolved.id}\`)\n\nAll future responses will use this model.`,
-          ephemeral: false,
-        });
-      } catch (e) {
-        logger.error({ msg: "Failed to switch model", error: String(e) });
-        await interaction.reply({
-          content: `❌ Failed to switch model: ${e}`,
-          ephemeral: true,
-        });
-      }
-      break;
-    }
-
-    default: {
-      // Check if this is a dynamically registered command from another plugin
-      const registeredCmd = registeredCommands.get(commandName);
-      if (registeredCmd) {
-        // Build args from interaction options, resolving Discord mentions to usernames
-        const args: string[] = [];
-        for (const option of interaction.options.data) {
-          if (option.value !== undefined) {
-            let value = String(option.value);
-            // Check for Discord user mention format <@USER_ID> or <@!USER_ID> and resolve to username
-            const mentionMatch = value.match(/^<@!?(\d+)>$/);
-            if (mentionMatch && client) {
-              try {
-                const user = await client.users.fetch(mentionMatch[1]);
-                if (user) {
-                  value = user.username; // Use the actual username
-                  logger.info({ msg: "Resolved mention to username", original: String(option.value), resolved: value });
-                }
-              } catch (err) {
-                logger.warn({ msg: "Failed to resolve mention to username", value, error: String(err) });
-                // Fall back to stripping mention format manually
-                value = value.replace(/^<@!?/, "").replace(/>$/, "");
-              }
-            }
-            args.push(value);
-          }
-        }
-
-        // Create a reply function that handles the interaction
-        let replied = false;
-        const reply = async (msg: string) => {
-          if (!replied) {
-            await interaction.reply({ content: msg, ephemeral: false });
-            replied = true;
-          } else {
-            await interaction.followUp({ content: msg, ephemeral: false });
-          }
-        };
-
-        try {
-          // Execute the channel command handler
-          await registeredCmd.handler({
-            channel: interaction.channelId,
-            channelType: "discord",
-            sender: interaction.user.username,
-            args,
-            reply,
-            getBotUsername: () => client?.user?.username || "unknown",
-          });
-
-          // If handler didn't reply, send a default acknowledgment
-          if (!replied) {
-            await interaction.reply({ content: "✓ Command executed", ephemeral: true });
-          }
-        } catch (err) {
-          logger.error({ msg: "Channel command handler error", command: commandName, error: String(err) });
-          if (!replied) {
-            await interaction.reply({ content: `Error: ${err}`, ephemeral: true });
-          }
-        }
-      } else {
-        logger.warn({ msg: "Unknown slash command", command: commandName });
-      }
-      break;
-    }
-  }
-}
-
-async function getSessionInfo(_sessionKey: string): Promise<string> {
-  // This would integrate with WOPR session API
-  return "💾 Session active";
-}
-
-async function handleWoprMessage(interaction: ChatInputCommandInteraction, messageContent: string) {
-  if (!ctx || !client) return;
-
-  const sessionKey = getSessionKeyFromInteraction(interaction);
-  const state = getSessionState(sessionKey);
-  state.messageCount++;
-
-  // Defer reply since AI response takes time
-  await interaction.deferReply();
-
-  // Add thinking level context
-  let fullMessage = messageContent;
-  if (state.thinkingLevel !== "medium") {
-    fullMessage = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
-  }
-
-  try {
-    const response = await ctx.inject(sessionKey, fullMessage, {
-      from: interaction.user.username,
-      channel: { type: "discord", id: interaction.channelId, name: "slash-command" },
-      // Skip conversation_history and channel_history - Discord handles its own context
-      contextProviders: ["session_system", "skills", "bootstrap_files"],
-    });
-
-    // Final edit with complete response
-    const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
-    await interaction.editReply((response + usage).slice(0, DISCORD_LIMIT));
-  } catch (error: any) {
-    logger.error({ msg: "Slash command inject failed", error: String(error) });
-    await interaction.editReply("❌ Error processing your request.");
-  }
-}
-
-// Handle @mention messages
 async function handleMessage(message: Message) {
-  if (!client || !ctx) return;
+  if (!client || !ctx || !channelProvider || !queueManager) return;
   if (!client.user) return;
 
   // Ignore our own messages
   if (message.author.id === client.user.id) return;
 
   // Check for registered message parsers FIRST - they need to see ALL messages
-  // including slash command responses (which contain FRIEND_REQUEST/ACCEPT)
-  if (await handleRegisteredParsers(message)) {
-    return; // Parser handled
+  if (await channelProvider.handleRegisteredParsers(message)) {
+    return;
   }
 
   // Ignore slash command interactions (for everything else)
@@ -2242,12 +256,9 @@ async function handleMessage(message: Message) {
   }
 
   // Check for registered channel commands (e.g., /friend from P2P plugin)
-  if (await handleRegisteredCommand(message)) {
-    return; // Command handled
+  if (await channelProvider.handleRegisteredCommand(message)) {
+    return;
   }
-
-  // Note: Message parsers already checked above (before interaction check)
-  // to ensure FRIEND_REQUEST/ACCEPT messages from slash command responses are processed
 
   const channelId = message.channel.id;
   const isDirectlyMentioned = message.mentions.users.has(client.user.id);
@@ -2256,8 +267,7 @@ async function handleMessage(message: Message) {
   const authorDisplayName =
     message.member?.displayName || (message.author as any).displayName || message.author.username;
 
-
-  // Resolve mentions in message content (@user -> @Username, #channel -> #channel-name)
+  // Resolve mentions in message content
   const resolvedContent = resolveMentions(message);
 
   // Log ALL messages to WOPR conversation context
@@ -2270,7 +280,7 @@ async function handleMessage(message: Message) {
   } catch (_e) {}
 
   // Add ALL messages to our buffer (for context building)
-  addToBuffer(channelId, {
+  queueManager.addToBuffer(channelId, {
     from: authorDisplayName,
     content: resolvedContent,
     timestamp: Date.now(),
@@ -2281,22 +291,18 @@ async function handleMessage(message: Message) {
 
   // === BOT MESSAGE HANDLING ===
   if (isBot) {
-    if (!isDirectlyMentioned) return; // Bots must @mention us
+    if (!isDirectlyMentioned) return;
 
-    // Prepare message content (use resolved content with readable mentions)
     let messageContent = resolvedContent;
-    // Remove bot's own @mention from the message
     const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
     messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
 
-    if (!messageContent) return; // Ignore empty bot mentions
+    if (!messageContent) return;
 
-    // Get accumulated context from buffer
-    const bufferContext = getBufferContext(channelId);
+    const bufferContext = queueManager.getBufferContext(channelId);
     const fullMessage = bufferContext + messageContent;
 
-    // Queue the bot response (will fire after cooldown + human typing check)
-    queueInject(channelId, {
+    queueManager.queueInject(channelId, {
       sessionKey,
       messageContent: fullMessage,
       authorDisplayName,
@@ -2310,20 +316,16 @@ async function handleMessage(message: Message) {
 
   // === HUMAN MESSAGE HANDLING ===
 
-  // Human @mention = immediate priority
   if (isDirectlyMentioned || isDM) {
-    // Get accumulated context from buffer
-    const bufferContext = getBufferContext(channelId);
+    const bufferContext = queueManager.getBufferContext(channelId);
 
-    // Use resolved content with readable mentions
     let messageContent = resolvedContent;
     if (client.user && isDirectlyMentioned) {
-      // Remove bot's own @mention from the message
       const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
       messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
     }
 
-    // Handle attachments - save to disk and append paths
+    // Handle attachments
     if (message.attachments.size > 0) {
       const attachmentPaths = await saveAttachments(message);
       if (attachmentPaths.length > 0) {
@@ -2333,19 +335,16 @@ async function handleMessage(message: Message) {
       }
     }
 
-    // If message was just a mention with no text (and no attachments), use a default prompt
     if (!messageContent) {
       messageContent = "Hello! (You mentioned me without a message)";
       logger.info({ msg: "Human @mention - empty message, using default", channelId });
     }
 
-    // Prepend buffer context
     const fullMessage = bufferContext + messageContent;
 
     logger.info({ msg: "Human @mention - queueing (priority)", channelId, hasContext: bufferContext.length > 0 });
 
-    // Queue with human priority (goes directly to chain, clears pending bot messages)
-    queueInject(channelId, {
+    queueManager.queueInject(channelId, {
       sessionKey,
       messageContent: fullMessage,
       authorDisplayName,
@@ -2355,141 +354,18 @@ async function handleMessage(message: Message) {
     });
     return;
   }
-
-  // Human message (no mention) = just logged to buffer above, nothing else to do
 }
 
-// Handle typing events - pause bot-to-bot when humans are typing
+// Handle typing events
 function handleTypingStart(typing: any) {
-  if (!client) return;
-
-  // Ignore bot typing
+  if (!client || !queueManager) return;
   if (typing.user.bot) return;
-
-  const channelId = typing.channel.id;
-  setHumanTyping(channelId);
+  queueManager.setHumanTyping(typing.channel.id);
 }
 
-// Core inject execution - called from promise chain with cancellation support
-async function executeInjectInternal(item: QueuedInject, cancelToken: { cancelled: boolean }) {
-  if (!ctx) return;
-
-  const { sessionKey, messageContent: rawContent, authorDisplayName, replyToMessage } = item;
-  const channelId = replyToMessage.channel.id;
-  // Use message ID as stream key to prevent race conditions between concurrent messages
-  const streamKey = replyToMessage.id;
-
-  // Check cancellation before starting
-  if (cancelToken.cancelled) {
-    logger.info({ msg: "executeInjectInternal - cancelled before start", sessionKey, streamKey });
-    await setMessageReaction(replyToMessage, REACTION_CANCELLED);
-    return;
-  }
-
-  // Transition from queued (🕐) to active (⚡)
-  await setMessageReaction(replyToMessage, REACTION_ACTIVE);
-
-  // Start typing indicator
-  const channel = replyToMessage.channel as TextChannel | ThreadChannel | DMChannel;
-  await startTyping(channel);
-
-  const state = getSessionState(sessionKey);
-  state.messageCount++;
-
-  // NOTE: No need to clean up existing stream - each message has unique streamKey
-  // This prevents the race condition where concurrent messages would clobber each other's streams
-
-  // Create new stream for THIS specific message
-  const stream = new DiscordMessageStream(
-    replyToMessage.channel as TextChannel | ThreadChannel | DMChannel,
-    replyToMessage,
-  );
-  streams.set(streamKey, stream);
-
-  // Add thinking level context
-  let messageContent = rawContent;
-  if (state.thinkingLevel !== "medium") {
-    messageContent = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
-  }
-
-  try {
-    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: authorDisplayName });
-    await ctx.inject(sessionKey, messageContent, {
-      from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
-      // Skip conversation_history and channel_history - Discord handles its own context buffer
-      contextProviders: ["session_system", "skills", "bootstrap_files"],
-      onStream: (msg: StreamMessage) => {
-        // Check cancellation during streaming
-        if (cancelToken.cancelled) return;
-        // Tick typing indicator on each chunk
-        tickTyping(channelId);
-        // Use streamKey (message ID) not sessionKey to route chunks to correct stream
-        handleChunk(msg, streamKey).catch((e) => logger.error({ msg: "Chunk error", streamKey, error: String(e) }));
-      },
-    });
-    logger.info({ msg: "executeInjectInternal - inject complete", sessionKey, streamKey });
-
-    // Finalize the stream
-    await stream.finalize();
-    streams.delete(streamKey);
-
-    // Stop typing indicator (pass channel to force-clear Discord's typing state)
-    stopTyping(channelId, channel);
-
-    // Transition to done (✅)
-    await setMessageReaction(replyToMessage, REACTION_DONE);
-
-    // Clear buffer after successful response
-    clearBuffer(channelId);
-  } catch (error: any) {
-    const errorStr = String(error);
-    const isCancelled =
-      cancelToken.cancelled ||
-      errorStr.toLowerCase().includes("cancelled") ||
-      errorStr.toLowerCase().includes("canceled");
-
-    // Stop typing indicator (pass channel to force-clear Discord's typing state)
-    stopTyping(channelId, channel);
-
-    if (isCancelled) {
-      logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey, streamKey });
-      try {
-        await stream.finalize();
-        streams.delete(streamKey);
-        await setMessageReaction(replyToMessage, REACTION_CANCELLED);
-      } catch (_e) {}
-    } else {
-      logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, streamKey, error: errorStr });
-      try {
-        await stream.finalize();
-        streams.delete(streamKey);
-        await setMessageReaction(replyToMessage, REACTION_ERROR);
-      } catch (_e) {}
-    }
-  }
-}
-
-// Register slash commands
-async function registerSlashCommands(token: string, clientId: string, guildId?: string) {
-  const rest = new REST({ version: "10" }).setToken(token);
-
-  try {
-    logger.info("Registering slash commands...");
-
-    if (guildId) {
-      // Register to specific guild (faster for development)
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands.map((cmd) => cmd.toJSON()) });
-      logger.info(`Registered ${commands.length} commands to guild ${guildId}`);
-    } else {
-      // Register globally (can take up to 1 hour to propagate)
-      await rest.put(Routes.applicationCommands(clientId), { body: commands.map((cmd) => cmd.toJSON()) });
-      logger.info(`Registered ${commands.length} global commands`);
-    }
-  } catch (error) {
-    logger.error({ msg: "Failed to register commands", error: String(error) });
-  }
-}
+// ============================================================================
+// Plugin object
+// ============================================================================
 
 const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
@@ -2511,7 +387,6 @@ const plugin: WOPRPlugin = {
             process.exit(1);
           }
 
-          // Call the daemon API to claim ownership
           try {
             const response = await fetch("http://localhost:7437/plugins/discord/claim", {
               method: "POST",
@@ -2526,7 +401,7 @@ const plugin: WOPRPlugin = {
             };
 
             if (result.success) {
-              console.log(`✓ Discord ownership claimed!`);
+              console.log(`\u2713 Discord ownership claimed!`);
               console.log(`  Owner: ${result.username} (${result.userId})`);
               process.exit(0);
             } else {
@@ -2546,28 +421,130 @@ const plugin: WOPRPlugin = {
       },
     },
   ],
+
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
 
-    // Register as a channel provider so other plugins can add commands/parsers
+    // 1. Leaf services (no inter-class deps)
+    const identityManager = new IdentityManager(ctx);
+    const typingManager = new TypingManager();
+    const streamRegistry = new StreamRegistry();
+    channelProvider = new DiscordChannelProviderImpl(() => client);
+
+    // 2. Services with deps
+    const reactionManager = new ReactionManager(() => client, identityManager);
+
+    // 3. Define executeInject closure (captures managers above)
+    // Late-bind queueManager reference since it depends on this closure
+    let queueManagerRef: ChannelQueueManager;
+
+    const executeInject = async (item: QueuedInject, cancelToken: { cancelled: boolean }) => {
+      if (!ctx) return;
+
+      const { sessionKey, messageContent: rawContent, authorDisplayName, replyToMessage } = item;
+      const channelId = replyToMessage.channel.id;
+      const streamKey = replyToMessage.id;
+
+      if (cancelToken.cancelled) {
+        logger.info({ msg: "executeInject - cancelled before start", sessionKey, streamKey });
+        await reactionManager.setReaction(replyToMessage, "cancelled");
+        return;
+      }
+
+      await reactionManager.setReaction(replyToMessage, "active");
+
+      const channel = replyToMessage.channel as TextChannel | ThreadChannel | DMChannel;
+      await typingManager.startTyping(channel);
+
+      const state = queueManagerRef.getSessionState(sessionKey);
+      state.messageCount++;
+
+      const stream = streamRegistry.createStream(streamKey, channel, replyToMessage);
+
+      let messageContent = rawContent;
+      if (state.thinkingLevel !== "medium") {
+        messageContent = `[Thinking level: ${state.thinkingLevel}] ${messageContent}`;
+      }
+
+      try {
+        logger.info({ msg: "executeInject - inject starting", sessionKey, streamKey, from: authorDisplayName });
+        await ctx.inject(sessionKey, messageContent, {
+          from: authorDisplayName,
+          channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
+          contextProviders: ["session_system", "skills", "bootstrap_files"],
+          onStream: (msg: StreamMessage) => {
+            if (cancelToken.cancelled) return;
+            typingManager.tickTyping(channelId);
+            streamRegistry
+              .handleChunk(msg, streamKey)
+              .catch((e) => logger.error({ msg: "Chunk error", streamKey, error: String(e) }));
+          },
+        });
+        logger.info({ msg: "executeInject - inject complete", sessionKey, streamKey });
+
+        await stream.finalize();
+        streamRegistry.deleteStream(streamKey);
+
+        typingManager.stopTyping(channelId, channel);
+
+        await reactionManager.setReaction(replyToMessage, "done");
+
+        queueManagerRef.clearBuffer(channelId);
+      } catch (error: any) {
+        const errorStr = String(error);
+        const isCancelled =
+          cancelToken.cancelled ||
+          errorStr.toLowerCase().includes("cancelled") ||
+          errorStr.toLowerCase().includes("canceled");
+
+        typingManager.stopTyping(channelId, channel);
+
+        if (isCancelled) {
+          logger.info({ msg: "executeInject - inject was cancelled", sessionKey, streamKey });
+          try {
+            await stream.finalize();
+            streamRegistry.deleteStream(streamKey);
+            await reactionManager.setReaction(replyToMessage, "cancelled");
+          } catch (_e) {}
+        } else {
+          logger.error({ msg: "executeInject - inject failed", sessionKey, streamKey, error: errorStr });
+          try {
+            await stream.finalize();
+            streamRegistry.deleteStream(streamKey);
+            await reactionManager.setReaction(replyToMessage, "error");
+          } catch (_e) {}
+        }
+      }
+    };
+
+    // 4. Queue manager (needs reaction + inject callback)
+    queueManager = new ChannelQueueManager(reactionManager, executeInject);
+    queueManagerRef = queueManager;
+
+    // 5. Slash command handler
+    const slashHandler = new SlashCommandHandler(
+      () => client,
+      ctx,
+      queueManager,
+      () => channelProvider!.getRegisteredCommands(),
+    );
+
+    // 6. Register with WOPR core
     if (ctx.registerChannelProvider) {
-      ctx.registerChannelProvider(discordChannelProvider);
+      ctx.registerChannelProvider(channelProvider);
       logger.info("Registered Discord channel provider");
     }
 
-    // Register the Discord extension so other plugins can send notifications
     if (ctx.registerExtension) {
       ctx.registerExtension("discord", discordExtension);
       logger.info("Registered Discord extension");
     }
 
-    // Subscribe to session events to deliver ALL session activity to Discord
-    // This includes: crons, sessions_send, P2P injects, CLI injects, etc.
-    // Uses the same streaming collapser as normal Discord messages via the event bus.
+    // 7. Event bus subscriptions
     logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
     if (ctx.events) {
-      // On inject start: send notification to Discord and create a stream for the response
+      // On inject start: send notification and create stream for the response
       ctx.events.on("session:beforeInject", async (payload: SessionInjectEvent) => {
         if (!payload.session.startsWith("discord:")) return;
         if (!payload.message) return;
@@ -2582,7 +559,6 @@ const plugin: WOPRPlugin = {
           return;
         }
 
-        // Format the source label
         let sourceLabel = payload.from;
         if (payload.from === "cron") {
           sourceLabel = "Cron";
@@ -2595,7 +571,6 @@ const plugin: WOPRPlugin = {
         }
 
         try {
-          // Send the notification message directly to get the Message object back
           const channel = await client.channels.fetch(channelId);
           if (!channel || !channel.isTextBased() || !("send" in channel)) {
             logger.warn({ msg: "Channel not sendable for streaming", session: payload.session, channelId });
@@ -2611,16 +586,17 @@ const plugin: WOPRPlugin = {
             msgId: notificationMsg.id,
           });
 
-          // Clean up any stale stream for this session
-          const existing = eventBusStreams.get(payload.session);
+          const existing = streamRegistry.getEventBusStream(payload.session);
           if (existing) {
             await existing.finalize().catch(() => {});
-            eventBusStreams.delete(payload.session);
+            streamRegistry.deleteEventBusStream(payload.session);
           }
 
-          // Create a streaming collapser that replies to the notification message
-          const stream = new DiscordMessageStream(channel as TextChannel | ThreadChannel | DMChannel, notificationMsg);
-          eventBusStreams.set(payload.session, stream);
+          streamRegistry.createEventBusStream(
+            payload.session,
+            channel as TextChannel | ThreadChannel | DMChannel,
+            notificationMsg,
+          );
         } catch (err) {
           logger.error({
             msg: "Failed to set up streaming for inject",
@@ -2632,17 +608,12 @@ const plugin: WOPRPlugin = {
       });
 
       // On inject complete: safety net for stream finalization
-      // Primary finalization happens on the "complete" stream event (immediate).
-      // This handler catches edge cases where the stream event was missed.
       ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
         if (!payload.session.startsWith("discord:")) return;
         if ((payload as any).channel?.type === "discord") return;
 
-        const stream = eventBusStreams.get(payload.session);
+        const stream = streamRegistry.getEventBusStream(payload.session);
         if (stream) {
-          // Core doesn't emit "stream" events to plugins, so the event bus stream
-          // created in beforeInject never receives content via ctx.on("stream").
-          // Deliver the full response here instead.
           if (payload.response) {
             logger.info({
               msg: "Delivering inject response to Discord stream",
@@ -2661,14 +632,13 @@ const plugin: WOPRPlugin = {
           await stream.finalize().catch((err) => {
             logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
           });
-          eventBusStreams.delete(payload.session);
+          streamRegistry.deleteEventBusStream(payload.session);
         } else if (payload.response) {
-          // No stream was created (e.g., channel not found) — fall back to bulk send
           logger.info({ msg: "No stream, falling back to bulk send", session: payload.session, from: payload.from });
           const channelId = findChannelIdFromConversationLog(payload.session);
           if (channelId) {
             try {
-              await discordChannelProvider.send(channelId, payload.response);
+              await channelProvider!.send(channelId, payload.response);
             } catch (err) {
               logger.error({
                 msg: "Failed to deliver response to Discord",
@@ -2683,20 +653,16 @@ const plugin: WOPRPlugin = {
     }
 
     // Subscribe to stream events on the plugin event bus
-    // This routes streaming tokens from ALL injects (including sessions_send, cron, CLI)
-    // through the same Discord collapser used for normal messages
     if (ctx.on) {
       ctx.on("stream", (event: SessionStreamEvent) => {
-        const stream = eventBusStreams.get(event.session);
+        const stream = streamRegistry.getEventBusStream(event.session);
         if (!stream) return;
 
         const msg = event.message;
 
-        // Handle completion/error — finalize immediately (don't wait for afterInject
-        // which is delayed by other handlers like semantic memory embeddings)
         if (msg.type === "complete" || msg.type === "error") {
           logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
-          eventBusStreams.delete(event.session);
+          streamRegistry.deleteEventBusStream(event.session);
           stream.finalize().catch((err) => {
             logger.error({
               msg: "Failed to finalize event bus stream on complete",
@@ -2707,11 +673,10 @@ const plugin: WOPRPlugin = {
           return;
         }
 
-        // Handle auto-compaction notifications
         if (msg.type === "system" && msg.subtype === "compact_boundary") {
           const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
           if (metadata?.trigger === "auto") {
-            let notification = "📦 **Auto-Compaction**\n";
+            let notification = "\u{1F4E6} **Auto-Compaction**\n";
             notification += metadata.pre_tokens
               ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
               : "Context has been automatically compressed";
@@ -2720,7 +685,6 @@ const plugin: WOPRPlugin = {
           return;
         }
 
-        // Extract text content
         let textContent = "";
         if (msg.type === "text" && msg.content) {
           textContent = msg.content;
@@ -2740,9 +704,11 @@ const plugin: WOPRPlugin = {
       logger.info("Subscribed to stream events for Discord streaming");
     }
 
-    await refreshIdentity();
+    // 8. Refresh identity
+    await identityManager.refresh();
+
+    // 9. Load config, create Discord client
     let config = ctx.getConfig<{ token?: string; guildId?: string; clientId?: string }>();
-    // Fall back to main config for Discord settings
     const mainDiscordConfig = ctx.getMainConfig("discord") as { token?: string; clientId?: string; guildId?: string };
     if (!config?.token && mainDiscordConfig?.token) {
       config = { ...config, token: mainDiscordConfig.token };
@@ -2765,37 +731,69 @@ const plugin: WOPRPlugin = {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.GuildMessageTyping, // For human typing detection
+        GatewayIntentBits.GuildMessageTyping,
       ],
-      partials: [Partials.Channel, Partials.Message], // Required for DMs
+      partials: [Partials.Channel, Partials.Message],
     });
 
+    // 10. Register event handlers
     client.on(Events.MessageCreate, (m) =>
       handleMessage(m).catch((e) => logger.error({ msg: "Message handling failed", error: String(e) })),
     );
+
     client.on(Events.InteractionCreate, async (interaction) => {
       // Handle autocomplete for /model command
       if (interaction.isAutocomplete()) {
-        if (interaction.commandName === "model") {
-          const focused = interaction.options.getFocused().toLowerCase();
-          const models = getAllModels();
-          const filtered = models
-            .filter((m) => m.id.includes(focused) || m.name.toLowerCase().includes(focused) || focused === "")
-            .slice(0, 25); // Discord max 25 choices
-          await interaction.respond(filtered.map((m) => ({ name: `${m.name} (${m.id})`, value: m.id })));
-        }
+        await slashHandler.handleAutocomplete(interaction);
         return;
       }
 
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
-        await handleSlashCommand(interaction).catch((e) => logger.error({ msg: "Command error", error: String(e) }));
+        // /claim is handled here (needs pairing functions from index.ts scope)
+        if (interaction.commandName === "claim") {
+          if (interaction.channel?.type !== 1) {
+            await interaction.reply({
+              content: "\u274C The /claim command only works in DMs. Please DM me to claim ownership.",
+              ephemeral: true,
+            });
+            return;
+          }
+
+          if (hasOwner(ctx!)) {
+            await interaction.reply({
+              content: "\u274C This bot already has an owner configured.",
+              ephemeral: true,
+            });
+            return;
+          }
+
+          const code = interaction.options.getString("code", true);
+          const result = await discordExtension.claimOwnership(code);
+
+          if (result.success) {
+            await interaction.reply({
+              content:
+                "\u2705 **Ownership claimed!**\n\n" +
+                "You will receive private notifications for friend requests and other owner-only features.",
+              ephemeral: true,
+            });
+            logger.info({ msg: "Bot ownership claimed" });
+          } else {
+            await interaction.reply({
+              content: `\u274C **Claim failed:** ${result.error}\n\nMake sure you're using the correct code and it hasn't expired.`,
+              ephemeral: true,
+            });
+          }
+          return;
+        }
+
+        await slashHandler.handle(interaction).catch((e) => logger.error({ msg: "Command error", error: String(e) }));
         return;
       }
 
       // Handle button interactions (friend request accept/deny)
       if (interaction.isButton() && isFriendRequestButton(interaction.customId)) {
-        // Get P2P extension for friend request handling
         const p2pExt = ctx?.getExtension?.("p2p") as
           | {
               acceptFriendRequest?: (
@@ -2813,7 +811,6 @@ const plugin: WOPRPlugin = {
           interaction,
           ctx!,
           client?.user?.username || "unknown",
-          // onAccept handler - returns the FRIEND_ACCEPT message to post
           async (from: string, pending) => {
             if (p2pExt?.acceptFriendRequest) {
               const result = await p2pExt.acceptFriendRequest(
@@ -2830,7 +827,6 @@ const plugin: WOPRPlugin = {
               return `Accepted friend request from @${from} (but P2P extension not available)`;
             }
           },
-          // onDeny handler - `pending` is fetched inside handleFriendButtonInteraction before removal
           async (from: string) => {
             if (p2pExt?.denyFriendRequest) {
               const pending = getPendingButtonRequest(from);
@@ -2847,19 +843,17 @@ const plugin: WOPRPlugin = {
       }
     });
 
-    // Typing detection - pause bot-to-bot when humans are typing
     client.on(Events.TypingStart, (typing) => handleTypingStart(typing));
 
-    // Start the queue processor for bot-to-bot responses
-    startQueueProcessor();
-
-    // Start cleanup interval for expired pairings and button requests
-    startCleanupInterval();
+    // 11. Start processors, login
+    queueManager.startProcessing(() => {
+      cleanupExpiredPairings();
+      cleanupExpiredButtonRequests();
+    });
 
     client.on(Events.ClientReady, async () => {
       logger.info({ tag: client?.user?.tag });
 
-      // Register slash commands
       if (config.clientId && config.token) {
         await registerSlashCommands(config.token, config.clientId, config.guildId);
       } else {
@@ -2867,19 +861,16 @@ const plugin: WOPRPlugin = {
       }
 
       // Subscribe to session:create to auto-create Discord channels
-      // Pattern: discord:{guild}:#{channel} -> create channel if it doesn't exist
       if (ctx?.events) {
         ctx.events.on("session:create", async (payload: SessionCreateEvent) => {
           const sessionName = payload.session;
 
-          // Only handle Discord session patterns
           const match = sessionName.match(/^discord:([^:]+):#(.+)$/);
           if (!match) return;
 
           const [, guildName, channelName] = match;
           logger.info({ msg: "Session create for Discord pattern", sessionName, guildName, channelName });
 
-          // Find the guild
           const guild = client?.guilds.cache.find(
             (g) =>
               g.name.toLowerCase().replace(/\s+/g, "-") === guildName.toLowerCase() ||
@@ -2891,7 +882,6 @@ const plugin: WOPRPlugin = {
             return;
           }
 
-          // Check if channel already exists
           const existingChannel = guild.channels.cache.find(
             (c) => c.name.toLowerCase() === channelName.toLowerCase() && c.type === ChannelType.GuildText,
           );
@@ -2901,7 +891,6 @@ const plugin: WOPRPlugin = {
             return;
           }
 
-          // Find WOPR category (or create one)
           let woprCategory = guild.channels.cache.find(
             (c) => c.name.toLowerCase() === "wopr" && c.type === ChannelType.GuildCategory,
           );
@@ -2919,7 +908,6 @@ const plugin: WOPRPlugin = {
             }
           }
 
-          // Create the channel under WOPR category
           try {
             const newChannel = await guild.channels.create({
               name: channelName,
@@ -2948,8 +936,9 @@ const plugin: WOPRPlugin = {
       throw e;
     }
   },
+
   async shutdown() {
-    stopQueueProcessor();
+    queueManager?.stopProcessing();
     if (ctx?.unregisterChannelProvider) {
       ctx.unregisterChannelProvider("discord");
     }
@@ -2957,6 +946,10 @@ const plugin: WOPRPlugin = {
       ctx.unregisterExtension("discord");
     }
     if (client) await client.destroy();
+    client = null;
+    ctx = null;
+    channelProvider = null;
+    queueManager = null;
   },
 };
 
