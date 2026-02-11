@@ -1251,6 +1251,33 @@ async function handleRegisteredParsers(message: Message): Promise<boolean> {
 const DISCORD_LIMIT = 2000;
 const EDIT_INTERVAL_MS = 1000; // Max 1 edit per second (Discord rate limit: 5 req/5s per channel)
 const IDLE_SPLIT_MS = 3500;
+const RATE_LIMIT_MAX_RETRIES = 3;
+
+/**
+ * Retry a Discord API call with exponential backoff on 429 rate-limit errors.
+ * discord.js DiscordAPIError has httpStatus and retryAfter properties.
+ */
+async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const isRateLimit = err?.httpStatus === 429 || err?.status === 429;
+      if (!isRateLimit || attempt >= RATE_LIMIT_MAX_RETRIES) {
+        throw err;
+      }
+      const retryAfterMs = (err.retryAfter ?? (attempt + 1) * 2) * 1000;
+      logger.warn({
+        msg: "Discord rate limit hit, retrying",
+        label,
+        attempt: attempt + 1,
+        retryAfterMs,
+      });
+      await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+    }
+  }
+  throw new Error(`Rate limit retry exhausted for ${label}`);
+}
 
 // Explicit state machine - each state is mutually exclusive
 type MessageState =
@@ -1363,8 +1390,11 @@ class DiscordMessageUnit {
 
     logger.debug({ msg: "Unit.sendInitial", unitId: this.unitId, contentLen: content.length, isReply: this.isReply });
 
-    // Transition: buffering → sending
-    const promise = this.isReply ? this.replyTo.reply(content) : this.channel.send(content);
+    // Transition: buffering → sending (with rate-limit retry)
+    const promise = withRateLimitRetry(
+      () => (this.isReply ? this.replyTo.reply(content) : this.channel.send(content)) as Promise<Message>,
+      `sendInitial:${this.unitId}`,
+    );
     this.state = { status: "sending", content, promise };
 
     try {
@@ -1385,7 +1415,8 @@ class DiscordMessageUnit {
     if (this.state.status !== "sent") return "skip";
 
     logger.debug({ msg: "Unit.editExisting", unitId: this.unitId, contentLen: content.length });
-    await this.state.discordMsg.edit(content);
+    const discordMsg = this.state.discordMsg;
+    await withRateLimitRetry(() => discordMsg.edit(content), `editExisting:${this.unitId}`);
     this.state = { ...this.state, content, lastEditLength: content.length };
     logger.debug({ msg: "Unit.editExisting success", unitId: this.unitId });
     return "ok";
@@ -1411,8 +1442,11 @@ class DiscordMessageUnit {
     });
 
     if (this.state.status === "buffering") {
-      // Send initial with truncated content
-      const promise = this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend);
+      // Send initial with truncated content (with rate-limit retry)
+      const promise = withRateLimitRetry(
+        () => (this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend)) as Promise<Message>,
+        `handleOverflow:send:${this.unitId}`,
+      );
       this.state = { status: "sending", content: toSend, promise };
 
       try {
@@ -1426,7 +1460,8 @@ class DiscordMessageUnit {
         throw error;
       }
     } else if (this.state.status === "sent") {
-      await this.state.discordMsg.edit(toSend);
+      const sentMsg = this.state.discordMsg;
+      await withRateLimitRetry(() => sentMsg.edit(toSend), `handleOverflow:edit:${this.unitId}`);
       this.state = { status: "finalized" };
       logger.debug({ msg: "Unit.handleOverflow edited and finalized", unitId: this.unitId });
     }
@@ -1491,7 +1526,9 @@ class DiscordMessageUnit {
     try {
       if (prevState.status === "sent") {
         logger.debug({ msg: "Unit.finalize editing sent message", unitId: this.unitId, contentLen: content.length });
-        await prevState.discordMsg.edit(content.slice(0, DISCORD_LIMIT));
+        const sentMsg = prevState.discordMsg;
+        const finalContent = content.slice(0, DISCORD_LIMIT);
+        await withRateLimitRetry(() => sentMsg.edit(finalContent), `finalize:edit:${this.unitId}`);
         logger.debug({ msg: "Unit.finalize edit success", unitId: this.unitId });
       } else if (prevState.status === "buffering") {
         logger.debug({
@@ -1500,9 +1537,11 @@ class DiscordMessageUnit {
           contentLen: content.length,
           isReply: this.isReply,
         });
-        const msg = this.isReply
-          ? await this.replyTo.reply(content.slice(0, DISCORD_LIMIT))
-          : await this.channel.send(content.slice(0, DISCORD_LIMIT));
+        const finalContent = content.slice(0, DISCORD_LIMIT);
+        const msg = await withRateLimitRetry(
+          () => (this.isReply ? this.replyTo.reply(finalContent) : this.channel.send(finalContent)) as Promise<Message>,
+          `finalize:send:${this.unitId}`,
+        );
         // Already finalized, but store reference if needed
         (this as any)._finalMsg = msg;
         logger.debug({ msg: "Unit.finalize send success", unitId: this.unitId, msgId: msg.id });
