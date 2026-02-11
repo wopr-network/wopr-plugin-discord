@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-check:
+    name: Lint and Type Check
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint and type check
+        run: npm run check
+
+  build:
+    name: Build (Node ${{ matrix.node-version }})
+    runs-on: [self-hosted, Linux, X64]
+    needs: lint-and-check
+    strategy:
+      matrix:
+        node-version: [lts/*, 22.x, 24.x]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  validate-package:
+    name: Validate Package (Node ${{ matrix.node-version }})
+    runs-on: [self-hosted, Linux, X64]
+    needs: build
+    strategy:
+      matrix:
+        node-version: [lts/*, 22.x, 24.x]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+
+      - name: Validate dist/index.js exists
+        run: |
+          if [ ! -f dist/index.js ]; then
+            echo "Error: dist/index.js not found"
+            exit 1
+          fi
+          echo "dist/index.js exists"
+
+      - name: Validate dist/index.d.ts exists
+        run: |
+          if [ ! -f dist/index.d.ts ]; then
+            echo "Error: dist/index.d.ts not found"
+            exit 1
+          fi
+          echo "dist/index.d.ts exists"
+
+      - name: Validate ESM import
+        run: node --input-type=module -e "import('./dist/index.js').then(() => console.log('ESM import successful'))"
+
+      - name: Validate npm packaging
+        run: |
+          npm pack --dry-run
+          echo "Package configuration valid"
