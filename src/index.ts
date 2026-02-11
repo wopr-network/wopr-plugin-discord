@@ -2,7 +2,7 @@
  * WOPR Discord Plugin - With Slash Commands
  */
 
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import {
@@ -20,7 +20,7 @@ import {
   TextChannel,
   ThreadChannel,
 } from "discord.js";
-import winston from "winston";
+import { findChannelIdFromConversationLog, getSessionKey, getSessionKeyFromInteraction, resolveMentions } from "./discord-utils.js";
 import {
   cleanupExpiredButtonRequests,
   createFriendRequestButtons,
@@ -32,6 +32,15 @@ import {
   storePendingButtonRequest,
 } from "./friend-buttons.js";
 import {
+  REACTION_ACTIVE,
+  REACTION_CANCELLED,
+  REACTION_DONE,
+  REACTION_ERROR,
+  REACTION_QUEUED,
+  refreshIdentity,
+} from "./identity-manager.js";
+import { logger } from "./logger.js";
+import {
   buildPairingMessage,
   claimPairingCode,
   cleanupExpiredPairings,
@@ -39,8 +48,8 @@ import {
   hasOwner,
   setOwner,
 } from "./pairing.js";
+import { startTyping, stopTyping, tickTyping } from "./typing-manager.js";
 import type {
-  AgentIdentity,
   ChannelCommand,
   ChannelCommandContext,
   ChannelMessageContext,
@@ -56,206 +65,8 @@ import type {
   WOPRPluginContext,
 } from "./types.js";
 
-const consoleFormat = winston.format.printf((info) => {
-  const level = info.level;
-
-  // Try to extract message from various possible locations
-  let msg = "";
-  let errorStr = "";
-
-  // Case 1: info.message is a string
-  if (typeof info.message === "string") {
-    msg = info.message;
-  }
-  // Case 2: info.message is an object with msg property
-  else if (info.message && typeof info.message === "object") {
-    const msgObj = info.message as Record<string, unknown>;
-    if (typeof msgObj.msg === "string") {
-      msg = msgObj.msg;
-    }
-    if (typeof msgObj.error === "string") {
-      errorStr = ` - ${msgObj.error}`;
-    }
-    // If no msg property, stringify the whole object
-    if (!msg) {
-      try {
-        msg = JSON.stringify(msgObj);
-      } catch {
-        msg = "[unserializable object]";
-      }
-    }
-  }
-  // Case 3: Check top-level info for msg/error (Winston splat format)
-  else {
-    const topLevel = info as Record<string, unknown>;
-    if (typeof topLevel.msg === "string") {
-      msg = topLevel.msg;
-    }
-    if (typeof topLevel.error === "string") {
-      errorStr = ` - ${topLevel.error}`;
-    }
-  }
-
-  // Fallback: stringify the entire info object if we still have no message
-  if (!msg) {
-    try {
-      // Exclude metadata fields
-      const { level: _l, timestamp: _t, service: _s, ...rest } = info as Record<string, unknown>;
-      msg = Object.keys(rest).length > 0 ? JSON.stringify(rest) : "[empty message]";
-    } catch {
-      msg = "[unserializable]";
-    }
-  }
-
-  return `${level}: ${msg}${errorStr}`;
-});
-
-const logger = winston.createLogger({
-  level: "debug",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json(),
-  ),
-  defaultMeta: { service: "wopr-plugin-discord" },
-  transports: [
-    new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
-      level: "error",
-    }),
-    new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"),
-      level: "debug",
-    }),
-    new winston.transports.Console({
-      format: winston.format.combine(winston.format.colorize(), consoleFormat),
-      level: "warn",
-    }),
-  ],
-});
-
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
-let agentIdentity: AgentIdentity = { name: "WOPR", emoji: "👀" };
-
-/**
- * Generate a readable session key from a Discord channel.
- * Format:
- * - Guild channels: discord:guildName:#channelName
- * - Threads: discord:guildName:#parentChannel/threadName
- * - DMs: discord:dm:username
- */
-function getSessionKey(channel: TextChannel | ThreadChannel | DMChannel): string {
-  // Sanitize name for use in session key (lowercase, replace spaces with -)
-  const sanitize = (name: string) =>
-    name
-      .toLowerCase()
-      .replace(/\s+/g, "-")
-      .replace(/[^a-z0-9-_]/g, "");
-
-  if (channel.isDMBased()) {
-    // DM channel - use recipient username
-    const dm = channel as DMChannel;
-    const recipientName = dm.recipient?.username || "unknown";
-    return `discord:dm:${sanitize(recipientName)}`;
-  }
-
-  if (channel.isThread()) {
-    // Thread - include parent channel
-    const thread = channel as ThreadChannel;
-    const guildName = thread.guild?.name || "unknown";
-    const parentName = thread.parent?.name || "unknown";
-    return `discord:${sanitize(guildName)}:#${sanitize(parentName)}/${sanitize(thread.name)}`;
-  }
-
-  // Regular text channel
-  const textChannel = channel as TextChannel;
-  const guildName = textChannel.guild?.name || "unknown";
-  return `discord:${sanitize(guildName)}:#${sanitize(textChannel.name)}`;
-}
-
-/**
- * Get session key from interaction (for slash commands)
- */
-function getSessionKeyFromInteraction(interaction: ChatInputCommandInteraction): string {
-  const channel = interaction.channel;
-  if (channel && (channel instanceof TextChannel || channel instanceof ThreadChannel || channel instanceof DMChannel)) {
-    return getSessionKey(channel);
-  }
-  // Fallback to channel ID if we can't resolve the channel type
-  return `discord:${interaction.channelId}`;
-}
-
-/**
- * Resolve Discord mentions in message content to readable names.
- * Converts <@USER_ID> to @Username and <#CHANNEL_ID> to #channel-name
- */
-function resolveMentions(message: Message): string {
-  let content = message.content;
-
-  // Resolve user mentions: <@USER_ID> or <@!USER_ID> -> @Username [USER_ID]
-  // Include both display name for readability AND ID for when WOPR needs to mention back
-  for (const [userId, user] of message.mentions.users) {
-    const member = message.guild?.members.cache.get(userId);
-    const displayName = member?.displayName || user.displayName || user.username;
-    // Replace both <@ID> and <@!ID> formats with @Name [ID]
-    content = content.replace(new RegExp(`<@!?${userId}>`, "g"), `@${displayName} [${userId}]`);
-  }
-
-  // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
-  for (const [channelId, channel] of message.mentions.channels) {
-    const channelName = (channel as any).name || channelId;
-    content = content.replace(new RegExp(`<#${channelId}>`, "g"), `#${channelName} [${channelId}]`);
-  }
-
-  // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
-  for (const [roleId, role] of message.mentions.roles) {
-    content = content.replace(new RegExp(`<@&${roleId}>`, "g"), `@${role.name} [${roleId}]`);
-  }
-
-  return content;
-}
-
-/**
- * Find the Discord channel ID from a session's conversation log.
- * Looks for the most recent message with a Discord channel reference.
- */
-function findChannelIdFromConversationLog(sessionName: string): string | null {
-  const sessionsDir = process.env.WOPR_HOME ? path.join(process.env.WOPR_HOME, "sessions") : "/data/sessions";
-  const logPath = path.join(sessionsDir, `${sessionName}.conversation.jsonl`);
-
-  if (!existsSync(logPath)) {
-    logger.debug({ msg: "Conversation log not found", sessionName, logPath });
-    return null;
-  }
-
-  try {
-    const content = readFileSync(logPath, "utf-8");
-    const lines = content
-      .trim()
-      .split("\n")
-      .filter((l) => l);
-
-    // Search from most recent entry backwards for a Discord channel reference
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.channel?.type === "discord" && entry.channel?.id) {
-          logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
-          return entry.channel.id;
-        }
-      } catch {
-        // Skip malformed lines
-      }
-    }
-
-    logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
-    return null;
-  } catch (err) {
-    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
-    return null;
-  }
-}
 
 // Slash command definitions
 const commands = [
@@ -402,57 +213,6 @@ function resolveModel(input: string): { provider: string; id: string; name: stri
   return null;
 }
 
-// Cache identity on init
-async function refreshIdentity() {
-  if (!ctx) return;
-  try {
-    const identity = await ctx.getAgentIdentity();
-    if (identity) {
-      agentIdentity = { ...agentIdentity, ...identity };
-      logger.info({ msg: "Identity refreshed", identity: agentIdentity });
-    }
-  } catch (e) {
-    logger.warn({ msg: "Failed to refresh identity", error: String(e) });
-  }
-  // Also refresh reaction emojis from config
-  await refreshReactionEmojis();
-}
-
-// Reaction emojis for message state - configurable via plugin settings
-let reactionEmojis = {
-  queued: "🕐",
-  active: "⚡",
-  done: "✅",
-  error: "❌",
-  cancelled: "⏹️",
-};
-
-async function refreshReactionEmojis(): Promise<void> {
-  if (!ctx) return;
-  try {
-    const config = ctx.getConfig<Record<string, any>>();
-    if (config) {
-      reactionEmojis = {
-        queued: config.emojiQueued || "🕐",
-        active: config.emojiActive || "⚡",
-        done: config.emojiDone || "✅",
-        error: config.emojiError || "❌",
-        cancelled: config.emojiCancelled || "⏹️",
-      };
-      logger.info({ msg: "Reaction emojis refreshed", emojis: reactionEmojis });
-    }
-  } catch (e) {
-    logger.warn({ msg: "Failed to refresh reaction emojis", error: String(e) });
-  }
-}
-
-// Convenience getters
-const REACTION_QUEUED = () => reactionEmojis.queued;
-const REACTION_ACTIVE = () => reactionEmojis.active;
-const REACTION_DONE = () => reactionEmojis.done;
-const REACTION_ERROR = () => reactionEmojis.error;
-const REACTION_CANCELLED = () => reactionEmojis.cancelled;
-
 /**
  * Set reaction state on a message. Removes old state reactions first.
  */
@@ -515,109 +275,6 @@ async function clearMessageReactions(message: Message): Promise<void> {
     } catch (_e) {
       // Ignore
     }
-  }
-}
-
-// ============================================================================
-// Typing Indicator Manager - Shows "Bot is typing..." during processing
-// ============================================================================
-
-interface TypingState {
-  interval: NodeJS.Timeout | null;
-  lastActivity: number;
-  active: boolean;
-}
-
-const typingStates = new Map<string, TypingState>();
-const TYPING_REFRESH_MS = 8000; // Discord typing indicator lasts ~10s, refresh at 8s
-const TYPING_IDLE_TIMEOUT_MS = 5000; // Stop typing after 5s of no activity
-
-/**
- * Start showing typing indicator in a channel.
- * Will auto-refresh every 8 seconds until stopped.
- */
-async function startTyping(channel: TextChannel | ThreadChannel | DMChannel): Promise<void> {
-  const channelId = channel.id;
-
-  // Clean up any existing typing state
-  stopTyping(channelId);
-
-  const state: TypingState = {
-    interval: null,
-    lastActivity: Date.now(),
-    active: true,
-  };
-
-  // Send initial typing indicator
-  try {
-    await channel.sendTyping();
-    logger.debug({ msg: "Typing indicator started", channelId });
-  } catch (e) {
-    logger.debug({ msg: "Failed to start typing indicator", channelId, error: String(e) });
-    return;
-  }
-
-  // Set up refresh interval
-  state.interval = setInterval(async () => {
-    const now = Date.now();
-    const idleTime = now - state.lastActivity;
-
-    // Stop if idle for too long
-    if (idleTime > TYPING_IDLE_TIMEOUT_MS) {
-      logger.debug({ msg: "Typing indicator stopped (idle)", channelId, idleTime });
-      stopTyping(channelId);
-      return;
-    }
-
-    // Refresh typing indicator
-    if (state.active) {
-      try {
-        await channel.sendTyping();
-        logger.debug({ msg: "Typing indicator refreshed", channelId });
-      } catch (_e) {
-        // Channel might be gone, stop typing
-        stopTyping(channelId);
-      }
-    }
-  }, TYPING_REFRESH_MS);
-
-  typingStates.set(channelId, state);
-}
-
-/**
- * Update activity timestamp to prevent idle timeout.
- * Call this when receiving stream chunks.
- */
-function tickTyping(channelId: string): void {
-  const state = typingStates.get(channelId);
-  if (state) {
-    state.lastActivity = Date.now();
-  }
-}
-
-/**
- * Stop showing typing indicator in a channel.
- * Optionally pass the channel to force-clear Discord's typing state
- * (Discord has no "stop typing" API — the only way is to send and delete a message).
- */
-function stopTyping(channelId: string, channel?: TextChannel | ThreadChannel | DMChannel): void {
-  const state = typingStates.get(channelId);
-  if (state) {
-    state.active = false;
-    if (state.interval) {
-      clearInterval(state.interval);
-      state.interval = null;
-    }
-    typingStates.delete(channelId);
-    logger.debug({ msg: "Typing indicator stopped", channelId });
-  }
-
-  // Force-clear typing by sending and immediately deleting an invisible message
-  if (channel) {
-    channel
-      .send("\u200b")
-      .then((m: any) => m.delete().catch(() => {}))
-      .catch(() => {});
   }
 }
 
@@ -2767,7 +2424,7 @@ const plugin: WOPRPlugin = {
       logger.info("Subscribed to stream events for Discord streaming");
     }
 
-    await refreshIdentity();
+    await refreshIdentity(ctx);
     let config = ctx.getConfig<{ token?: string; guildId?: string; clientId?: string }>();
     // Fall back to main config for Discord settings
     const mainDiscordConfig = ctx.getMainConfig("discord") as { token?: string; clientId?: string; guildId?: string };
