@@ -25,6 +25,7 @@ import {
   cleanupExpiredButtonRequests,
   createFriendRequestButtons,
   createFriendRequestEmbed,
+  getOwnerUserId,
   getPendingButtonRequest,
   handleFriendButtonInteraction,
   isFriendRequestButton,
@@ -1149,7 +1150,7 @@ const discordExtension = {
   },
 
   hasOwner: () => (ctx ? hasOwner(ctx) : false),
-  getOwnerId: () => ctx?.getConfig<{ ownerUserId?: string }>()?.ownerUserId || null,
+  getOwnerId: () => (ctx ? getOwnerUserId(ctx) : null),
 };
 
 /**
