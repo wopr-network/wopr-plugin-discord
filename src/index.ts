@@ -426,10 +426,6 @@ let reactionEmojis = {
   cancelled: "⏹️",
 };
 
-function _getReactionEmoji(state: keyof typeof reactionEmojis): string {
-  return reactionEmojis[state];
-}
-
 async function refreshReactionEmojis(): Promise<void> {
   if (!ctx) return;
   try {
@@ -455,15 +451,6 @@ const REACTION_ACTIVE = () => reactionEmojis.active;
 const REACTION_DONE = () => reactionEmojis.done;
 const REACTION_ERROR = () => reactionEmojis.error;
 const REACTION_CANCELLED = () => reactionEmojis.cancelled;
-
-function _getAckReaction(): string {
-  return agentIdentity.emoji?.trim() || "👀";
-}
-
-function _getMessagePrefix(): string {
-  const name = agentIdentity.name?.trim();
-  return name ? `[${name}]` : "[WOPR]";
-}
 
 /**
  * Set reaction state on a message. Removes old state reactions first.
@@ -818,11 +805,6 @@ function getBufferContext(channelId: string): string {
 function clearBuffer(channelId: string) {
   const queue = getChannelQueue(channelId);
   queue.buffer = [];
-}
-
-function _isHumanTyping(channelId: string): boolean {
-  const queue = getChannelQueue(channelId);
-  return Date.now() < queue.humanTypingUntil;
 }
 
 function setHumanTyping(channelId: string) {
