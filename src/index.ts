@@ -65,6 +65,7 @@ let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
 let channelProvider: DiscordChannelProviderImpl | null = null;
 let queueManager: ChannelQueueManager | null = null;
+let typingManager: TypingManager | null = null;
 
 // ============================================================================
 // Config Schema
@@ -204,10 +205,11 @@ const discordExtension = {
 
   claimOwnership: async (
     code: string,
+    clientIdentifier?: string,
   ): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
     if (!ctx) return { success: false, error: "Discord plugin not initialized" };
 
-    const request = claimPairingCode(code);
+    const request = claimPairingCode(code, clientIdentifier);
     if (!request) {
       return { success: false, error: "Invalid or expired pairing code" };
     }
@@ -295,7 +297,8 @@ async function handleMessage(message: Message) {
 
     let messageContent = resolvedContent;
     const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-    messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
+    const escapedBotName = botDisplayName.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+    messageContent = messageContent.replace(new RegExp(`@${escapedBotName}\\s*`, "gi"), "").trim();
 
     if (!messageContent) return;
 
@@ -322,7 +325,8 @@ async function handleMessage(message: Message) {
     let messageContent = resolvedContent;
     if (client.user && isDirectlyMentioned) {
       const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-      messageContent = messageContent.replace(new RegExp(`@${botDisplayName}\\s*`, "gi"), "").trim();
+      const escapedBotName = botDisplayName.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+      messageContent = messageContent.replace(new RegExp(`@${escapedBotName}\\s*`, "gi"), "").trim();
     }
 
     // Handle attachments
@@ -428,7 +432,7 @@ const plugin: WOPRPlugin = {
 
     // 1. Leaf services (no inter-class deps)
     const identityManager = new IdentityManager(ctx);
-    const typingManager = new TypingManager();
+    typingManager = new TypingManager();
     const streamRegistry = new StreamRegistry();
     channelProvider = new DiscordChannelProviderImpl(() => client);
 
@@ -769,7 +773,7 @@ const plugin: WOPRPlugin = {
           }
 
           const code = interaction.options.getString("code", true);
-          const result = await discordExtension.claimOwnership(code);
+          const result = await discordExtension.claimOwnership(code, interaction.user.id);
 
           if (result.success) {
             await interaction.reply({
@@ -939,6 +943,7 @@ const plugin: WOPRPlugin = {
 
   async shutdown() {
     queueManager?.stopProcessing();
+    typingManager?.dispose();
     if (ctx?.unregisterChannelProvider) {
       ctx.unregisterChannelProvider("discord");
     }
@@ -950,6 +955,7 @@ const plugin: WOPRPlugin = {
     ctx = null;
     channelProvider = null;
     queueManager = null;
+    typingManager = null;
   },
 };
 

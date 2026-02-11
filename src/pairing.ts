@@ -7,11 +7,45 @@
 
 import crypto from "node:crypto";
 import type { WOPRPluginContext } from "./types.js";
+import { logger } from "./logger.js";
 
 // Pairing code settings
 const PAIRING_CODE_LENGTH = 8;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // No ambiguous chars
 const PAIRING_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// Rate limiting for claim attempts (CWE-307)
+const CLAIM_RATE_LIMIT_MAX = 5; // max attempts
+const CLAIM_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15-minute window
+const claimAttempts: Map<string, { count: number; firstAttempt: number }> = new Map();
+
+/**
+ * Check if a client has exceeded the claim rate limit.
+ * Returns true if the request should be blocked.
+ */
+function checkClaimRateLimit(clientIdentifier: string): boolean {
+  const now = Date.now();
+  const entry = claimAttempts.get(clientIdentifier);
+
+  if (!entry || now - entry.firstAttempt > CLAIM_RATE_LIMIT_WINDOW_MS) {
+    // Window expired or first attempt -- reset
+    claimAttempts.set(clientIdentifier, { count: 1, firstAttempt: now });
+    return false;
+  }
+
+  entry.count++;
+  if (entry.count > CLAIM_RATE_LIMIT_MAX) {
+    logger.warn({
+      msg: "Pairing claim rate limit exceeded",
+      clientIdentifier,
+      attempts: entry.count,
+      windowMs: CLAIM_RATE_LIMIT_WINDOW_MS,
+    });
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * Pending pairing request
@@ -79,24 +113,39 @@ export function createPairingRequest(discordUserId: string, discordUsername: str
 
 /**
  * Claim a pairing code
- * Returns the Discord user info if valid, null if invalid/expired
+ * Returns the Discord user info if valid, null if invalid/expired.
+ * Includes rate limiting (5 attempts per 15 min per client) and audit logging.
  */
-export function claimPairingCode(code: string): PairingRequest | null {
+export function claimPairingCode(code: string, clientIdentifier?: string): PairingRequest | null {
   const normalizedCode = code.trim().toUpperCase();
+
+  // Rate limit check
+  if (clientIdentifier && checkClaimRateLimit(clientIdentifier)) {
+    logger.warn({ msg: "Pairing claim blocked by rate limit", clientIdentifier });
+    return null;
+  }
+
   const request = pendingPairings.get(normalizedCode);
 
   if (!request) {
+    logger.info({ msg: "Pairing claim failed: invalid code", clientIdentifier: clientIdentifier || "unknown" });
     return null;
   }
 
   // Check expiry
   if (Date.now() - request.createdAt > PAIRING_CODE_TTL_MS) {
     pendingPairings.delete(normalizedCode);
+    logger.info({ msg: "Pairing claim failed: expired code", clientIdentifier: clientIdentifier || "unknown" });
     return null;
   }
 
   // Valid - remove and return
   pendingPairings.delete(normalizedCode);
+  logger.info({
+    msg: "Pairing code claimed successfully",
+    clientIdentifier: clientIdentifier || "unknown",
+    discordUserId: request.discordUserId,
+  });
   return request;
 }
 

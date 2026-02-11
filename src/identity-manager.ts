@@ -59,7 +59,7 @@ export class IdentityManager {
   }
 
   getReactionEmoji(state: "queued" | "active" | "done" | "error" | "cancelled"): string {
-    return this.reactionEmojis[state];
+    return this.reactionEmojis[state] ?? "\u2753";
   }
 
   getAllStateReactions(): string[] {

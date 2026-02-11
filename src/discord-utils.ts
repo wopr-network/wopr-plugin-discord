@@ -62,6 +62,13 @@ export function getSessionKeyFromInteraction(interaction: ChatInputCommandIntera
 }
 
 /**
+ * Escape special regex characters in a string to prevent ReDoS.
+ */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+}
+
+/**
  * Resolve Discord mentions in message content to readable names.
  * Converts <@USER_ID> to @Username and <#CHANNEL_ID> to #channel-name
  */
@@ -74,18 +81,18 @@ export function resolveMentions(message: Message): string {
     const member = message.guild?.members.cache.get(userId);
     const displayName = member?.displayName || user.displayName || user.username;
     // Replace both <@ID> and <@!ID> formats with @Name [ID]
-    content = content.replace(new RegExp(`<@!?${userId}>`, "g"), `@${displayName} [${userId}]`);
+    content = content.replace(new RegExp(`<@!?${escapeRegex(userId)}>`, "g"), `@${displayName} [${userId}]`);
   }
 
   // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
   for (const [channelId, channel] of message.mentions.channels) {
     const channelName = (channel as any).name || channelId;
-    content = content.replace(new RegExp(`<#${channelId}>`, "g"), `#${channelName} [${channelId}]`);
+    content = content.replace(new RegExp(`<#${escapeRegex(channelId)}>`, "g"), `#${channelName} [${channelId}]`);
   }
 
   // Resolve role mentions: <@&ROLE_ID> -> @RoleName [ROLE_ID]
   for (const [roleId, role] of message.mentions.roles) {
-    content = content.replace(new RegExp(`<@&${roleId}>`, "g"), `@${role.name} [${roleId}]`);
+    content = content.replace(new RegExp(`<@&${escapeRegex(roleId)}>`, "g"), `@${role.name} [${roleId}]`);
   }
 
   return content;

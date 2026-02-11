@@ -301,12 +301,18 @@ export class SlashCommandHandler {
           if (this.ctx.setSessionProvider) {
             await this.ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
           } else {
-            const { exec } = await import("node:child_process");
+            const { execFile } = await import("node:child_process");
             const { promisify } = await import("node:util");
-            const execAsync = promisify(exec);
-            await execAsync(
-              `node /app/dist/cli.js session set-provider ${sessionKey} ${resolved.provider} --model ${resolved.id}`,
-            );
+            const execFileAsync = promisify(execFile);
+            await execFileAsync("node", [
+              "/app/dist/cli.js",
+              "session",
+              "set-provider",
+              sessionKey,
+              resolved.provider,
+              "--model",
+              resolved.id,
+            ]);
           }
 
           await interaction.reply({
