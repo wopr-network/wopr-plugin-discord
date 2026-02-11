@@ -1112,8 +1112,12 @@ async function sendFriendRequestNotification(
       return false;
     }
 
-    // Store pending request for button handling
-    storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
+    // Validate and store pending request for button handling
+    const validationError = storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
+    if (validationError) {
+      logger.warn({ msg: "Friend request rejected: invalid keys", requestFrom, error: validationError });
+      return false;
+    }
 
     // Create the embed and buttons
     const pubkeyShort = `${pubkey.slice(0, 12)}...`;
@@ -1142,21 +1146,23 @@ const discordExtension = {
   // Pairing methods for CLI
   claimOwnership: async (
     code: string,
+    sourceId?: string,
+    claimingUserId?: string,
   ): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
     if (!ctx) return { success: false, error: "Discord plugin not initialized" };
 
-    const request = claimPairingCode(code);
-    if (!request) {
-      return { success: false, error: "Invalid or expired pairing code" };
+    const result = claimPairingCode(code, sourceId, claimingUserId);
+    if (!result.request) {
+      return { success: false, error: result.error || "Invalid or expired pairing code" };
     }
 
     // Set the owner in config
-    await setOwner(ctx, request.discordUserId);
+    await setOwner(ctx, result.request.discordUserId);
 
     return {
       success: true,
-      userId: request.discordUserId,
-      username: request.discordUsername,
+      userId: result.request.discordUserId,
+      username: result.request.discordUsername,
     };
   },
 
@@ -2006,7 +2012,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
       }
 
       const code = interaction.options.getString("code", true);
-      const result = await discordExtension.claimOwnership(code);
+      const result = await discordExtension.claimOwnership(code, interaction.user.id, interaction.user.id);
 
       if (result.success) {
         await interaction.reply({
