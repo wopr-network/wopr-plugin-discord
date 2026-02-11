@@ -22,7 +22,11 @@ export function setChannelProviderClient(c: Client | null): void {
 }
 
 // Registered commands and parsers from other plugins (e.g., P2P friend commands)
-export const registeredCommands: Map<string, ChannelCommand> = new Map();
+const registeredCommands: Map<string, ChannelCommand> = new Map();
+
+export function getRegisteredCommand(name: string): ChannelCommand | undefined {
+  return registeredCommands.get(name);
+}
 const registeredParsers: Map<string, ChannelMessageParser> = new Map();
 
 /**
@@ -140,6 +144,7 @@ export async function handleRegisteredParsers(message: Message): Promise<boolean
     if (typeof parser.pattern === "function") {
       matches = parser.pattern(content);
     } else {
+      parser.pattern.lastIndex = 0;
       matches = parser.pattern.test(content);
     }
 

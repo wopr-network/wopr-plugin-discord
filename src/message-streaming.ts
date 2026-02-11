@@ -115,11 +115,12 @@ export class DiscordMessageUnit {
       return "skip";
     }
 
-    const content = this.state.content.trim();
-    if (!content) {
+    if (!this.state.content.trim()) {
       logger.debug({ msg: "Unit.flush skip - empty", unitId: this.unitId });
       return "skip";
     }
+
+    const content = this.state.content;
 
     logger.debug({ msg: "Unit.flush", unitId: this.unitId, status: this.state.status, contentLen: content.length });
 
@@ -294,7 +295,6 @@ export class DiscordMessageUnit {
           () => (this.isReply ? this.replyTo.reply(finalContent) : this.channel.send(finalContent)) as Promise<Message>,
           `finalize:send:${this.unitId}`,
         );
-        (this as any)._finalMsg = msg;
         logger.debug({ msg: "Unit.finalize send success", unitId: this.unitId, msgId: msg.id });
       }
     } catch (error) {

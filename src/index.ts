@@ -22,9 +22,9 @@ import {
 } from "discord.js";
 import {
   discordChannelProvider,
+  getRegisteredCommand,
   handleRegisteredCommand,
   handleRegisteredParsers,
-  registeredCommands,
   setChannelProviderClient,
 } from "./channel-provider.js";
 import {
@@ -997,7 +997,7 @@ async function handleSlashCommand(interaction: ChatInputCommandInteraction) {
 
     default: {
       // Check if this is a dynamically registered command from another plugin
-      const registeredCmd = registeredCommands.get(commandName);
+      const registeredCmd = getRegisteredCommand(commandName);
       if (registeredCmd) {
         // Build args from interaction options, resolving Discord mentions to usernames
         const args: string[] = [];
