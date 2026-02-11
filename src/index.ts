@@ -2256,7 +2256,6 @@ async function handleMessage(message: Message) {
   const authorDisplayName =
     message.member?.displayName || (message.author as any).displayName || message.author.username;
 
-
   // Resolve mentions in message content (@user -> @Username, #channel -> #channel-name)
   const resolvedContent = resolveMentions(message);
 
