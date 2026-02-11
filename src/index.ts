@@ -1254,19 +1254,19 @@ const IDLE_SPLIT_MS = 3500;
 const RATE_LIMIT_MAX_RETRIES = 3;
 
 /**
- * Retry a Discord API call with exponential backoff on 429 rate-limit errors.
- * discord.js DiscordAPIError has httpStatus and retryAfter properties.
+ * Retry a Discord API call with linear backoff on 429 rate-limit errors.
+ * discord.js DiscordAPIError retryAfter is in milliseconds.
  */
 async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
-  for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < RATE_LIMIT_MAX_RETRIES; attempt++) {
     try {
       return await fn();
     } catch (err: any) {
       const isRateLimit = err?.httpStatus === 429 || err?.status === 429;
-      if (!isRateLimit || attempt >= RATE_LIMIT_MAX_RETRIES) {
+      if (!isRateLimit || attempt >= RATE_LIMIT_MAX_RETRIES - 1) {
         throw err;
       }
-      const retryAfterMs = (err.retryAfter ?? (attempt + 1) * 2) * 1000;
+      const retryAfterMs = err.retryAfter ?? (attempt + 1) * 2000;
       logger.warn({
         msg: "Discord rate limit hit, retrying",
         label,
