@@ -157,7 +157,8 @@ export function claimPairingCode(
 }
 
 /**
- * Get a pending pairing request by code (for display)
+ * Get a pending pairing request by code (for display).
+ * @public Part of the Discord plugin extension API.
  */
 export function getPairingRequest(code: string): PairingRequest | null {
   const normalizedCode = code.trim().toUpperCase();
@@ -177,7 +178,8 @@ export function getPairingRequest(code: string): PairingRequest | null {
 }
 
 /**
- * List all pending pairing requests (for admin)
+ * List all pending pairing requests (for admin).
+ * @public Part of the Discord plugin extension API.
  */
 export function listPairingRequests(): PairingRequest[] {
   const now = Date.now();
