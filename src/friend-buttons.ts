@@ -8,16 +8,24 @@
 import { ActionRowBuilder, ButtonBuilder, type ButtonInteraction, ButtonStyle, EmbedBuilder } from "discord.js";
 import type { WOPRPluginContext } from "./types.js";
 
+// Align button request TTL with pairing code TTL (15 minutes)
+const BUTTON_REQUEST_TTL_MS = 15 * 60 * 1000;
+
+// Discord custom ID max length is 100 characters
+const DISCORD_CUSTOM_ID_MAX_LENGTH = 100;
+// "friend_accept:" = 14 chars (longest prefix)
+const MAX_USERNAME_IN_CUSTOM_ID = DISCORD_CUSTOM_ID_MAX_LENGTH - "friend_accept:".length;
+
 /**
  * Pending friend request with button context
  */
-interface PendingButtonRequest {
-  requestFrom: string; // Username of requester
-  requestPubkey: string; // Public key of requester
-  encryptPub: string; // Encryption pubkey
+export interface PendingButtonRequest {
+  requestFrom: string;
+  requestPubkey: string;
+  encryptPub: string;
   timestamp: number;
   channelId: string;
-  messageId?: string; // ID of the notification message
+  messageId?: string;
   signature: string;
 }
 
@@ -25,17 +33,37 @@ interface PendingButtonRequest {
 const pendingButtonRequests: Map<string, PendingButtonRequest> = new Map();
 
 /**
+ * Validate an Ed25519 public key (32 bytes, hex-encoded = 64 chars)
+ */
+export function isValidEd25519Pubkey(pubkey: string): boolean {
+  if (typeof pubkey !== "string") return false;
+  return /^[0-9a-fA-F]{64}$/.test(pubkey);
+}
+
+/**
+ * Truncate a username to fit within Discord's 100-char custom ID limit
+ */
+function truncateForCustomId(username: string): string {
+  if (username.length <= MAX_USERNAME_IN_CUSTOM_ID) {
+    return username;
+  }
+  return username.slice(0, MAX_USERNAME_IN_CUSTOM_ID);
+}
+
+/**
  * Create Accept/Deny buttons for a friend request
  */
 export function createFriendRequestButtons(requestFrom: string): ActionRowBuilder<ButtonBuilder> {
+  const truncatedFrom = truncateForCustomId(requestFrom);
+
   const acceptButton = new ButtonBuilder()
-    .setCustomId(`friend_accept:${requestFrom}`)
+    .setCustomId(`friend_accept:${truncatedFrom}`)
     .setLabel("Accept")
     .setStyle(ButtonStyle.Success)
     .setEmoji("✅");
 
   const denyButton = new ButtonBuilder()
-    .setCustomId(`friend_deny:${requestFrom}`)
+    .setCustomId(`friend_deny:${truncatedFrom}`)
     .setLabel("Deny")
     .setStyle(ButtonStyle.Danger)
     .setEmoji("❌");
@@ -50,7 +78,7 @@ export function createFriendRequestButtons(requestFrom: string): ActionRowBuilde
  */
 export function createFriendRequestEmbed(requestFrom: string, pubkeyShort: string, channelName: string): EmbedBuilder {
   return new EmbedBuilder()
-    .setColor(0x5865f2) // Discord blurple
+    .setColor(0x5865f2)
     .setTitle("Friend Request Received")
     .setDescription(`**@${requestFrom}** wants to be your friend!`)
     .addFields(
@@ -63,7 +91,8 @@ export function createFriendRequestEmbed(requestFrom: string, pubkeyShort: strin
 }
 
 /**
- * Store a pending button request
+ * Store a pending button request after validating pubkey format.
+ * Returns an error string if validation fails, undefined on success.
  */
 export function storePendingButtonRequest(
   requestFrom: string,
@@ -71,7 +100,15 @@ export function storePendingButtonRequest(
   encryptPub: string,
   channelId: string,
   signature: string,
-): void {
+): string | undefined {
+  if (!isValidEd25519Pubkey(pubkey)) {
+    return "Invalid public key format (expected 64-char hex Ed25519 key)";
+  }
+
+  if (!isValidEd25519Pubkey(encryptPub)) {
+    return "Invalid encryption public key format";
+  }
+
   pendingButtonRequests.set(requestFrom.toLowerCase(), {
     requestFrom,
     requestPubkey: pubkey,
@@ -80,6 +117,8 @@ export function storePendingButtonRequest(
     channelId,
     signature,
   });
+
+  return undefined;
 }
 
 /**
@@ -138,24 +177,20 @@ export async function handleFriendButtonInteraction(
     return;
   }
 
-  // Defer immediately to avoid Discord's 3-second interaction timeout
   await interaction.deferUpdate();
 
   if (parsed.action === "accept") {
     try {
       const acceptMessage = await onAccept(parsed.from, pending);
 
-      // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Edit the deferred message to show it was accepted
       await interaction.editReply({
         content: `Friend request from @${parsed.from} **accepted**.`,
         embeds: [],
         components: [],
       });
 
-      // Post the accept message to the channel where the request was received
       const channel = interaction.client.channels.cache.get(pending.channelId);
       if (channel?.isTextBased() && "send" in channel) {
         await channel.send(acceptMessage);
@@ -172,10 +207,8 @@ export async function handleFriendButtonInteraction(
     try {
       await onDeny(parsed.from);
 
-      // Remove from pending
       removePendingButtonRequest(parsed.from);
 
-      // Edit the deferred message to show it was denied
       await interaction.editReply({
         content: `Friend request from @${parsed.from} **denied**.`,
         embeds: [],
@@ -193,14 +226,13 @@ export async function handleFriendButtonInteraction(
 }
 
 /**
- * Clean up expired pending requests (older than 5 minutes)
+ * Clean up expired pending requests (older than TTL)
  */
 export function cleanupExpiredButtonRequests(): void {
   const now = Date.now();
-  const expiry = 5 * 60 * 1000; // 5 minutes
 
   for (const [key, request] of pendingButtonRequests) {
-    if (now - request.timestamp > expiry) {
+    if (now - request.timestamp > BUTTON_REQUEST_TTL_MS) {
       pendingButtonRequests.delete(key);
     }
   }

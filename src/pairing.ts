@@ -13,14 +13,27 @@ const PAIRING_CODE_LENGTH = 8;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // No ambiguous chars
 const PAIRING_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
+// Rate limiting for claim attempts
+const CLAIM_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
+const CLAIM_RATE_LIMIT_MAX_ATTEMPTS = 5; // max 5 attempts per window
+
+interface ClaimAttempt {
+  count: number;
+  windowStart: number;
+}
+
+// Track claim attempts by source identifier
+const claimAttempts: Map<string, ClaimAttempt> = new Map();
+
 /**
  * Pending pairing request
  */
-interface PairingRequest {
+export interface PairingRequest {
   code: string;
   discordUserId: string;
   discordUsername: string;
   createdAt: number;
+  claimed: boolean;
 }
 
 // In-memory store for pending pairing requests
@@ -72,32 +85,75 @@ export function createPairingRequest(discordUserId: string, discordUsername: str
     discordUserId,
     discordUsername,
     createdAt: Date.now(),
+    claimed: false,
   });
 
   return code;
 }
 
 /**
- * Claim a pairing code
- * Returns the Discord user info if valid, null if invalid/expired
+ * Check if a claim source is rate-limited.
+ * Returns true if the attempt is allowed, false if rate-limited.
  */
-export function claimPairingCode(code: string): PairingRequest | null {
+export function checkClaimRateLimit(sourceId: string): boolean {
+  const now = Date.now();
+  const attempt = claimAttempts.get(sourceId);
+
+  if (!attempt || now - attempt.windowStart > CLAIM_RATE_LIMIT_WINDOW_MS) {
+    claimAttempts.set(sourceId, { count: 1, windowStart: now });
+    return true;
+  }
+
+  attempt.count++;
+  if (attempt.count > CLAIM_RATE_LIMIT_MAX_ATTEMPTS) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Claim a pairing code.
+ * sourceId is used for rate limiting (e.g. Discord user ID or IP).
+ * claimingUserId, if provided, must match the user who generated the code.
+ */
+export function claimPairingCode(
+  code: string,
+  sourceId?: string,
+  claimingUserId?: string,
+): { request: PairingRequest | null; error?: string } {
+  // Rate limit check
+  if (sourceId && !checkClaimRateLimit(sourceId)) {
+    return { request: null, error: "Rate limited. Try again in 1 minute." };
+  }
+
   const normalizedCode = code.trim().toUpperCase();
   const request = pendingPairings.get(normalizedCode);
 
   if (!request) {
-    return null;
+    return { request: null, error: "Invalid or expired pairing code" };
   }
 
   // Check expiry
   if (Date.now() - request.createdAt > PAIRING_CODE_TTL_MS) {
     pendingPairings.delete(normalizedCode);
-    return null;
+    return { request: null, error: "Pairing code has expired" };
   }
 
-  // Valid - remove and return
+  // Check if already claimed (race condition guard)
+  if (request.claimed) {
+    return { request: null, error: "Pairing code has already been claimed" };
+  }
+
+  // Bind check: code must be claimed by the same Discord user who generated it
+  if (claimingUserId && request.discordUserId !== claimingUserId) {
+    return { request: null, error: "This pairing code was not generated for your account" };
+  }
+
+  // Mark as claimed and remove
+  request.claimed = true;
   pendingPairings.delete(normalizedCode);
-  return request;
+  return { request };
 }
 
 /**
@@ -139,13 +195,18 @@ export function listPairingRequests(): PairingRequest[] {
 }
 
 /**
- * Clean up expired pairing requests
+ * Clean up expired pairing requests and stale rate limit entries
  */
 export function cleanupExpiredPairings(): void {
   const now = Date.now();
   for (const [code, request] of pendingPairings) {
     if (now - request.createdAt > PAIRING_CODE_TTL_MS) {
       pendingPairings.delete(code);
+    }
+  }
+  for (const [sourceId, attempt] of claimAttempts) {
+    if (now - attempt.windowStart > CLAIM_RATE_LIMIT_WINDOW_MS) {
+      claimAttempts.delete(sourceId);
     }
   }
 }
