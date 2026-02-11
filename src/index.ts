@@ -297,7 +297,7 @@ async function handleMessage(message: Message) {
 
     let messageContent = resolvedContent;
     const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-    const escapedBotName = botDisplayName.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+    const escapedBotName = botDisplayName.replace(/[.*+?^${}()[\]\\|]/g, "\\$&");
     messageContent = messageContent.replace(new RegExp(`@${escapedBotName}\\s*`, "gi"), "").trim();
 
     if (!messageContent) return;
@@ -325,7 +325,7 @@ async function handleMessage(message: Message) {
     let messageContent = resolvedContent;
     if (client.user && isDirectlyMentioned) {
       const botDisplayName = message.guild?.members.me?.displayName || client.user?.username || "WOPR";
-      const escapedBotName = botDisplayName.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+      const escapedBotName = botDisplayName.replace(/[.*+?^${}()[\]\\|]/g, "\\$&");
       messageContent = messageContent.replace(new RegExp(`@${escapedBotName}\\s*`, "gi"), "").trim();
     }
 
@@ -459,7 +459,7 @@ const plugin: WOPRPlugin = {
       await reactionManager.setReaction(replyToMessage, "active");
 
       const channel = replyToMessage.channel as TextChannel | ThreadChannel | DMChannel;
-      await typingManager.startTyping(channel);
+      await typingManager?.startTyping(channel);
 
       const state = queueManagerRef.getSessionState(sessionKey);
       state.messageCount++;
@@ -479,7 +479,7 @@ const plugin: WOPRPlugin = {
           contextProviders: ["session_system", "skills", "bootstrap_files"],
           onStream: (msg: StreamMessage) => {
             if (cancelToken.cancelled) return;
-            typingManager.tickTyping(channelId);
+            typingManager?.tickTyping(channelId);
             streamRegistry
               .handleChunk(msg, streamKey)
               .catch((e) => logger.error({ msg: "Chunk error", streamKey, error: String(e) }));
@@ -490,7 +490,7 @@ const plugin: WOPRPlugin = {
         await stream.finalize();
         streamRegistry.deleteStream(streamKey);
 
-        typingManager.stopTyping(channelId, channel);
+        typingManager?.stopTyping(channelId, channel);
 
         await reactionManager.setReaction(replyToMessage, "done");
 
@@ -502,7 +502,7 @@ const plugin: WOPRPlugin = {
           errorStr.toLowerCase().includes("cancelled") ||
           errorStr.toLowerCase().includes("canceled");
 
-        typingManager.stopTyping(channelId, channel);
+        typingManager?.stopTyping(channelId, channel);
 
         if (isCancelled) {
           logger.info({ msg: "executeInject - inject was cancelled", sessionKey, streamKey });

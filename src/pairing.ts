@@ -6,8 +6,8 @@
  */
 
 import crypto from "node:crypto";
-import type { WOPRPluginContext } from "./types.js";
 import { logger } from "./logger.js";
+import type { WOPRPluginContext } from "./types.js";
 
 // Pairing code settings
 const PAIRING_CODE_LENGTH = 8;

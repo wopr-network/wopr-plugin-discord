@@ -1,5 +1,13 @@
+import fs from "node:fs";
 import path from "node:path";
 import winston from "winston";
+
+const logDir = path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs");
+try {
+  fs.mkdirSync(logDir, { recursive: true });
+} catch {
+  // Best effort — console transport still works
+}
 
 const consoleFormat = winston.format.printf((info) => {
   const level = info.level;
@@ -65,11 +73,11 @@ export const logger = winston.createLogger({
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
     new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
+      filename: path.join(logDir, "discord-plugin-error.log"),
       level: "error",
     }),
     new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"),
+      filename: path.join(logDir, "discord-plugin.log"),
       level: "debug",
     }),
     new winston.transports.Console({

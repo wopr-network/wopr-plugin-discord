@@ -62,12 +62,12 @@ export class SlashCommandHandler {
 
     const q = input.toLowerCase().trim();
 
-    // Exact ID match
-    const exact = models.find((m) => m.id === q);
+    // Exact ID match (case-insensitive)
+    const exact = models.find((m) => m.id.toLowerCase() === q);
     if (exact) return exact;
 
-    // Substring match on model ID
-    const partial = models.find((m) => m.id.includes(q));
+    // Substring match on model ID (case-insensitive)
+    const partial = models.find((m) => m.id.toLowerCase().includes(q));
     if (partial) return partial;
 
     // Substring match on display name
@@ -301,18 +301,7 @@ export class SlashCommandHandler {
           if (this.ctx.setSessionProvider) {
             await this.ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
           } else {
-            const { execFile } = await import("node:child_process");
-            const { promisify } = await import("node:util");
-            const execFileAsync = promisify(execFile);
-            await execFileAsync("node", [
-              "/app/dist/cli.js",
-              "session",
-              "set-provider",
-              sessionKey,
-              resolved.provider,
-              "--model",
-              resolved.id,
-            ]);
+            throw new Error("Session provider switching not available in this environment");
           }
 
           await interaction.reply({

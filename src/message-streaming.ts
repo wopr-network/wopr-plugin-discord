@@ -25,6 +25,7 @@ export class DiscordMessageUnit {
   private readonly isReply: boolean;
   private readonly unitId: string;
   private _overflow: string = ""; // Content that didn't fit after a split
+  private _finalMsg: Message | null = null; // Message sent during finalize
 
   constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message, isReply: boolean) {
     this.channel = channel;
@@ -45,6 +46,7 @@ export class DiscordMessageUnit {
 
   get discordMsg(): Message | null {
     if (this.state.status === "sent") return this.state.discordMsg;
+    if (this._finalMsg) return this._finalMsg;
     return null;
   }
 
@@ -239,14 +241,13 @@ export class DiscordMessageUnit {
       return;
     }
 
-    // Immediately mark as finalized to prevent races
     const prevState = this.state;
-    this.state = { status: "finalized" };
 
     try {
       if (prevState.status === "sent") {
         logger.debug({ msg: "Unit.finalize editing sent message", unitId: this.unitId, contentLen: content.length });
         await prevState.discordMsg.edit(content.slice(0, DISCORD_LIMIT));
+        this.state = { status: "finalized" };
         logger.debug({ msg: "Unit.finalize edit success", unitId: this.unitId });
       } else if (prevState.status === "buffering") {
         logger.debug({
@@ -258,12 +259,15 @@ export class DiscordMessageUnit {
         const msg = this.isReply
           ? await this.replyTo.reply(content.slice(0, DISCORD_LIMIT))
           : await this.channel.send(content.slice(0, DISCORD_LIMIT));
-        // Already finalized, but store reference if needed
-        (this as any)._finalMsg = msg;
+        this._finalMsg = msg;
+        this.state = { status: "finalized" };
         logger.debug({ msg: "Unit.finalize send success", unitId: this.unitId, msgId: msg.id });
+      } else {
+        this.state = { status: "finalized" };
       }
     } catch (error) {
       logger.error({ msg: "Unit.finalize failed", unitId: this.unitId, error: String(error) });
+      this.state = { status: "finalized" };
     }
   }
 }
@@ -495,6 +499,13 @@ export class StreamRegistry {
   private eventBusStreams = new Map<string, DiscordMessageStream>();
 
   createStream(key: string, channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message): DiscordMessageStream {
+    const existing = this.streams.get(key);
+    if (existing) {
+      logger.warn({ msg: "Replacing existing stream", key });
+      existing
+        .finalize()
+        .catch((e) => logger.error({ msg: "Failed to finalize replaced stream", key, error: String(e) }));
+    }
     const stream = new DiscordMessageStream(channel, replyTo);
     this.streams.set(key, stream);
     return stream;
@@ -513,6 +524,15 @@ export class StreamRegistry {
     channel: TextChannel | ThreadChannel | DMChannel,
     replyTo: Message,
   ): DiscordMessageStream {
+    const existing = this.eventBusStreams.get(sessionKey);
+    if (existing) {
+      logger.warn({ msg: "Replacing existing event bus stream", sessionKey });
+      existing
+        .finalize()
+        .catch((e) =>
+          logger.error({ msg: "Failed to finalize replaced event bus stream", sessionKey, error: String(e) }),
+        );
+    }
     const stream = new DiscordMessageStream(channel, replyTo);
     this.eventBusStreams.set(sessionKey, stream);
     return stream;

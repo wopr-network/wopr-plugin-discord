@@ -65,7 +65,7 @@ export function getSessionKeyFromInteraction(interaction: ChatInputCommandIntera
  * Escape special regex characters in a string to prevent ReDoS.
  */
 function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()\[\]\\|]/g, "\\$&");
+  return str.replace(/[.*+?^${}()[\]\\|]/g, "\\$&");
 }
 
 /**
