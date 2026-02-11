@@ -2,7 +2,7 @@
  * Typing Indicator Manager
  *
  * Shows "Bot is typing..." during processing. Auto-refreshes every 8s
- * (Discord typing indicator lasts ~10s) and stops after 5s of inactivity.
+ * (Discord typing indicator lasts ~10s) and stops after up to 8s of inactivity (checked on refresh interval).
  */
 
 import type { DMChannel, TextChannel, ThreadChannel } from "discord.js";

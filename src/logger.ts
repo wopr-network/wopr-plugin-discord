@@ -2,6 +2,7 @@
  * Winston logger for WOPR Discord Plugin
  */
 
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import winston from "winston";
 
@@ -59,6 +60,9 @@ const consoleFormat = winston.format.printf((info) => {
   return `${level}: ${msg}${errorStr}`;
 });
 
+const logDir = path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs");
+mkdirSync(logDir, { recursive: true });
+
 export const logger = winston.createLogger({
   level: "debug",
   format: winston.format.combine(
@@ -69,11 +73,11 @@ export const logger = winston.createLogger({
   defaultMeta: { service: "wopr-plugin-discord" },
   transports: [
     new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin-error.log"),
+      filename: path.join(logDir, "discord-plugin-error.log"),
       level: "error",
     }),
     new winston.transports.File({
-      filename: path.join(process.env.WOPR_HOME || "/tmp/wopr-test", "logs", "discord-plugin.log"),
+      filename: path.join(logDir, "discord-plugin.log"),
       level: "debug",
     }),
     new winston.transports.Console({
