@@ -418,7 +418,7 @@ export class SlashCommandHandler {
     const client = this.getClient();
     if (!client) return;
 
-    const sessionKey = getSessionKeyFromInteraction(interaction);
+    const sessionKey = this.getEffectiveSessionKey(interaction);
     const state = this.queueManager.getSessionState(sessionKey);
     state.messageCount++;
 

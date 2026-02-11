@@ -666,14 +666,18 @@ const plugin: WOPRPlugin = {
 
         if (msg.type === "complete" || msg.type === "error") {
           logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
-          streamRegistry.deleteEventBusStream(event.session);
-          stream.finalize().catch((err) => {
-            logger.error({
-              msg: "Failed to finalize event bus stream on complete",
-              session: event.session,
-              error: String(err),
+          stream
+            .finalize()
+            .catch((err) => {
+              logger.error({
+                msg: "Failed to finalize event bus stream on complete",
+                session: event.session,
+                error: String(err),
+              });
+            })
+            .finally(() => {
+              streamRegistry.deleteEventBusStream(event.session);
             });
-          });
           return;
         }
 
