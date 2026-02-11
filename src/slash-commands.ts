@@ -12,12 +12,18 @@ interface ResolvedModel {
 }
 
 export class SlashCommandHandler {
+  private sessionOverrides = new Map<string, string>();
+
   constructor(
     private getClient: () => Client | null,
     private ctx: WOPRPluginContext,
     private queueManager: ChannelQueueManager,
     private getRegisteredCommands: () => Map<string, ChannelCommand>,
   ) {}
+
+  getEffectiveSessionKey(interaction: ChatInputCommandInteraction): string {
+    return this.sessionOverrides.get(interaction.channelId) ?? getSessionKeyFromInteraction(interaction);
+  }
 
   // Get all available models from all registered providers
   private getAllModels(): ResolvedModel[] {
@@ -82,7 +88,7 @@ export class SlashCommandHandler {
     if (!client) return;
 
     const { commandName } = interaction;
-    const sessionKey = getSessionKeyFromInteraction(interaction);
+    const sessionKey = this.getEffectiveSessionKey(interaction);
     const state = this.queueManager.getSessionState(sessionKey);
 
     logger.info({ msg: "Slash command received", command: commandName, user: interaction.user.tag });
@@ -194,6 +200,7 @@ export class SlashCommandHandler {
         const name = interaction.options.getString("name", true);
         const baseKey = getSessionKeyFromInteraction(interaction);
         const newSessionKey = `${baseKey}/${name}`;
+        this.sessionOverrides.set(interaction.channelId, newSessionKey);
         await interaction.reply({
           content: `\u{1F4AC} **Switched to session:** ${newSessionKey}\n\nNote: Each session maintains separate context.`,
           ephemeral: false,

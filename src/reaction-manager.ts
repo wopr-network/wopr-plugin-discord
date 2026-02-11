@@ -8,6 +8,15 @@ export class ReactionManager {
     private identityManager: IdentityManager,
   ) {}
 
+  private findReaction(message: Message, emoji: string) {
+    return (
+      message.reactions.cache.get(emoji) ??
+      message.reactions.cache.find(
+        (r) => r.emoji.toString() === emoji || r.emoji.identifier === emoji || r.emoji.name === emoji,
+      )
+    );
+  }
+
   /**
    * Set reaction state on a message. Removes old state reactions first.
    */
@@ -23,7 +32,7 @@ export class ReactionManager {
       // Remove any existing state reactions from us
       for (const emoji of stateReactions) {
         try {
-          const existingReaction = message.reactions.cache.get(emoji);
+          const existingReaction = this.findReaction(message, emoji);
           if (existingReaction?.users.cache.has(botId)) {
             await existingReaction.users.remove(botId);
           }
@@ -51,7 +60,7 @@ export class ReactionManager {
 
     for (const emoji of stateReactions) {
       try {
-        const existingReaction = message.reactions.cache.get(emoji);
+        const existingReaction = this.findReaction(message, emoji);
         if (existingReaction?.users.cache.has(botId)) {
           await existingReaction.users.remove(botId);
         }

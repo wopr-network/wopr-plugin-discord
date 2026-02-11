@@ -205,7 +205,7 @@ const discordExtension = {
 
   claimOwnership: async (
     code: string,
-    clientIdentifier?: string,
+    clientIdentifier: string,
   ): Promise<{ success: boolean; userId?: string; username?: string; error?: string }> => {
     if (!ctx) return { success: false, error: "Discord plugin not initialized" };
 

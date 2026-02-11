@@ -116,11 +116,11 @@ export function createPairingRequest(discordUserId: string, discordUsername: str
  * Returns the Discord user info if valid, null if invalid/expired.
  * Includes rate limiting (5 attempts per 15 min per client) and audit logging.
  */
-export function claimPairingCode(code: string, clientIdentifier?: string): PairingRequest | null {
+export function claimPairingCode(code: string, clientIdentifier: string): PairingRequest | null {
   const normalizedCode = code.trim().toUpperCase();
 
-  // Rate limit check
-  if (clientIdentifier && checkClaimRateLimit(clientIdentifier)) {
+  // Rate limit check — always enforced
+  if (checkClaimRateLimit(clientIdentifier)) {
     logger.warn({ msg: "Pairing claim blocked by rate limit", clientIdentifier });
     return null;
   }
