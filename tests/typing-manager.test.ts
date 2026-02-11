@@ -9,7 +9,7 @@
  * - Cleaning up all channels on dispose
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createMockTextChannel, createMockDMChannel, createMockThreadChannel } from "./mocks/discord-client.js";
+import { createMockTextChannel, createMockDMChannel } from "./mocks/discord-client.js";
 
 // ---------------------------------------------------------------------------
 // Extracted typing manager logic (mirrors src/index.ts implementation)

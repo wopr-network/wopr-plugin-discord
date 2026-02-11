@@ -9,7 +9,7 @@
  * - Ack reaction emoji from identity or fallback
  * - Reaction emoji refresh from config (emojiQueued, emojiActive, etc.)
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { createMockContext } from "./mocks/wopr-context.js";
 
 // ---------------------------------------------------------------------------

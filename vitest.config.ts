@@ -1,6 +1,15 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  resolve: {
+    extensions: [".ts", ".js"],
+    alias: [
+      {
+        find: /^(\.\.?\/.*)\.js$/,
+        replacement: "$1",
+      },
+    ],
+  },
   test: {
     globals: true,
     environment: "node",
@@ -10,13 +19,6 @@ export default defineConfig({
       reporter: ["text", "lcov"],
       include: ["src/**/*.ts"],
       exclude: ["src/**/*.d.ts"],
-    },
-    resolve: {
-      extensions: [".ts", ".js"],
-    },
-    alias: {
-      // Allow importing .js extensions to resolve to .ts source files
-      "^(\\.\\.?/.*)\\.js$": "$1",
     },
   },
 });

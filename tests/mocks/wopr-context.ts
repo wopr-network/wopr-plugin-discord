@@ -23,7 +23,15 @@ export function createMockEventBus(overrides: Partial<WOPREventBus> = {}): WOPRE
     }),
     once: vi.fn((event: string, handler: Function) => {
       if (!handlers.has(event)) handlers.set(event, []);
-      handlers.get(event)!.push(handler);
+      const wrapper = (...args: any[]) => {
+        const list = handlers.get(event);
+        if (list) {
+          const idx = list.indexOf(wrapper);
+          if (idx >= 0) list.splice(idx, 1);
+        }
+        return handler(...args);
+      };
+      handlers.get(event)!.push(wrapper);
     }),
     off: vi.fn((event: string, handler: Function) => {
       const list = handlers.get(event);

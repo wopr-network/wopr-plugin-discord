@@ -128,8 +128,6 @@ async function setupPlugin(options: {
   injectResponse?: string;
 } = {}) {
   const mockClient = createMockClient();
-  // Make send return a mock message (for reply tracking)
-  const mockSentMessage = createMockMessage({ id: "sent-msg-1" });
 
   // The plugin creates its own Client via new Client().
   // Our mock of discord.js returns __testMockClient.
@@ -583,10 +581,8 @@ describe("Channel Queue System", () => {
   describe("Promise chain ordering", () => {
     it("should process human messages sequentially in order", async () => {
       const injectOrder: string[] = [];
-      const { handleMessage, shutdown } = await setupPlugin({ injectDelay: 30 });
+      const { ctx, shutdown } = await setupPlugin({ injectDelay: 30 });
 
-      // Override inject to track order
-      const { ctx } = await setupPlugin({ injectDelay: 30 });
       let callCount = 0;
       (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, msg: string) => {
         callCount++;

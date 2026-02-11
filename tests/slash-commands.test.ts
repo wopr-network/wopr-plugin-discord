@@ -13,9 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMockClient,
   createMockInteraction,
-  createMockMessage,
   createMockTextChannel,
-  createMockUser,
 } from "./mocks/discord-client.js";
 import { createMockContext } from "./mocks/wopr-context.js";
 
