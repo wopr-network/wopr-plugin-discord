@@ -11,29 +11,23 @@ permissions:
 
 jobs:
   lint-and-check:
-    name: Lint and Type Check (Node ${{ matrix.node-version }})
+    name: Lint and Type Check
     runs-on: [self-hosted, Linux, X64]
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x, 22.x]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: '22.x'
           cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run Biome check
-        run: npm run lint
-
-      - name: Run TypeScript type check
-        run: npx tsc --noEmit
+      - name: Lint and type check
+        run: npm run check
 
   build:
     name: Build (Node ${{ matrix.node-version }})
@@ -41,7 +35,7 @@ jobs:
     needs: lint-and-check
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        node-version: [lts/*, 22.x, 24.x]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -72,8 +66,17 @@ jobs:
     needs: build
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        node-version: [lts/*, 22.x, 24.x]
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -95,3 +98,11 @@ jobs:
             exit 1
           fi
           echo "dist/index.d.ts exists"
+
+      - name: Validate ESM import
+        run: node --input-type=module -e "import('./dist/index.js').then(() => console.log('ESM import successful'))"
+
+      - name: Validate npm packaging
+        run: |
+          npm pack --dry-run
+          echo "Package configuration valid"

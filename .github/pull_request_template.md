@@ -10,7 +10,7 @@
 
 ## Checklist
 
-- [ ] TypeScript compilation passes (`tsc --noEmit`)
-- [ ] Biome check passes (`biome check src/`)
+- [ ] Lint and type check pass (`npm run check`)
+- [ ] Build succeeds (`npm run build`)
 - [ ] Changes tested locally
 - [ ] Build artifacts validated (dist/index.js and dist/index.d.ts exist)
