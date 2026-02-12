@@ -20,15 +20,15 @@ export type {
   PluginCommand,
   PluginInjectOptions,
   PluginLogger,
+  SessionCreateEvent,
+  SessionInjectEvent,
+  SessionResponseEvent,
   StreamMessage,
   UserProfile,
   WOPREvent,
   WOPREventBus,
   WOPRPlugin,
   WOPRPluginContext,
-  SessionCreateEvent,
-  SessionInjectEvent,
-  SessionResponseEvent,
 } from "@wopr-network/plugin-types";
 
 import type { ChannelRef, StreamMessage } from "@wopr-network/plugin-types";
