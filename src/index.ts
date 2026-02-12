@@ -112,8 +112,10 @@ const configSchema: ConfigSchema = {
       default: "\u23f9\ufe0f",
       description: "Emoji shown when cancelled",
     },
-    { name: "pairingRequests", type: "object", hidden: true, default: {} },
-    { name: "mappings", type: "object", hidden: true, default: {} },
+    // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
+    { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },
+    // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
+    { name: "mappings", type: "object", label: "Channel Mappings", hidden: true, default: {} },
   ],
 };
 

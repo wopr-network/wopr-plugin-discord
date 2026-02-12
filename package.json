@@ -25,6 +25,7 @@
   "author": "WOPR",
   "license": "MIT",
   "dependencies": {
+    "@wopr-network/plugin-types": "^0.1.0",
     "discord.js": "^14.14.1",
     "winston": "^3.19.0"
   },
