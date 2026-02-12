@@ -213,10 +213,8 @@ const plugin: WOPRPlugin = {
       logger.info("Registered Discord extension");
     }
 
-    // 6. Event bus subscriptions
+    // 6. Event bus subscriptions (session/stream events registered after client is created below)
     logger.info({ msg: "Checking ctx.events availability", hasEvents: !!ctx.events });
-    subscribeSessionEvents(ctx, client!);
-    subscribeStreamEvents(ctx);
 
     // 7. Refresh identity
     await refreshIdentity(ctx);
@@ -254,12 +252,17 @@ const plugin: WOPRPlugin = {
     setReactionClient(client);
     setChannelProviderClient(client);
 
+    // Subscribe session/stream events now that client exists
+    subscribeSessionEvents(ctx, client);
+    subscribeStreamEvents(ctx);
+
     // 9. Register event handlers
-    client.on(Events.MessageCreate, (m) =>
-      handleMessage(m, client!, ctx!, queueManager!).catch((e) =>
+    client.on(Events.MessageCreate, (m) => {
+      if (!client || !ctx || !queueManager) return;
+      return handleMessage(m, client, ctx, queueManager).catch((e) =>
         logger.error({ msg: "Message handling failed", error: String(e) }),
-      ),
-    );
+      );
+    });
     client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.isAutocomplete()) {
         await slashHandler
