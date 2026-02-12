@@ -363,53 +363,56 @@ export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
   const ctxAny = ctx as unknown as Record<string, unknown>;
   if (typeof ctxAny.on !== "function") return;
 
-  (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)("stream", (event: SessionStreamEvent) => {
-    const stream = eventBusStreams.get(event.session);
-    if (!stream) return;
+  (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)(
+    "stream",
+    (event: SessionStreamEvent) => {
+      const stream = eventBusStreams.get(event.session);
+      if (!stream) return;
 
-    const msg = event.message;
+      const msg = event.message;
 
-    if (msg.type === "complete" || msg.type === "error") {
-      logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
-      eventBusStreams.delete(event.session);
-      stream.finalize().catch((err) => {
-        logger.error({
-          msg: "Failed to finalize event bus stream on complete",
-          session: event.session,
-          error: String(err),
+      if (msg.type === "complete" || msg.type === "error") {
+        logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
+        eventBusStreams.delete(event.session);
+        stream.finalize().catch((err) => {
+          logger.error({
+            msg: "Failed to finalize event bus stream on complete",
+            session: event.session,
+            error: String(err),
+          });
         });
-      });
-      return;
-    }
-
-    if (msg.type === "system" && msg.subtype === "compact_boundary") {
-      const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
-      if (metadata?.trigger === "auto") {
-        let notification = "\u{1f4e6} **Auto-Compaction**\n";
-        notification += metadata.pre_tokens
-          ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
-          : "Context has been automatically compressed";
-        stream.append(`\n\n${notification}\n\n`);
+        return;
       }
-      return;
-    }
 
-    let textContent = "";
-    if (msg.type === "text" && msg.content) {
-      textContent = msg.content;
-    } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
-      const content = (msg as any).message.content;
-      if (Array.isArray(content)) {
-        textContent = content.map((c: any) => c.text || "").join("");
-      } else if (typeof content === "string") {
-        textContent = content;
+      if (msg.type === "system" && msg.subtype === "compact_boundary") {
+        const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+        if (metadata?.trigger === "auto") {
+          let notification = "\u{1f4e6} **Auto-Compaction**\n";
+          notification += metadata.pre_tokens
+            ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
+            : "Context has been automatically compressed";
+          stream.append(`\n\n${notification}\n\n`);
+        }
+        return;
       }
-    }
 
-    if (textContent) {
-      stream.append(textContent);
-    }
-  });
+      let textContent = "";
+      if (msg.type === "text" && msg.content) {
+        textContent = msg.content;
+      } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
+        const content = (msg as any).message.content;
+        if (Array.isArray(content)) {
+          textContent = content.map((c: any) => c.text || "").join("");
+        } else if (typeof content === "string") {
+          textContent = content;
+        }
+      }
+
+      if (textContent) {
+        stream.append(textContent);
+      }
+    },
+  );
   logger.info("Subscribed to stream events for Discord streaming");
 }
 
