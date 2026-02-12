@@ -436,8 +436,9 @@ export class SlashCommandHandler {
         state.model = resolved.id;
 
         try {
-          if (this.ctx.setSessionProvider) {
-            await this.ctx.setSessionProvider(sessionKey, resolved.provider, { model: resolved.id });
+          const ctxAny = this.ctx as unknown as Record<string, unknown>;
+          if (typeof ctxAny.setSessionProvider === "function") {
+            await (ctxAny.setSessionProvider as (session: string, provider: string, opts?: { model?: string }) => Promise<void>)(sessionKey, resolved.provider, { model: resolved.id });
           } else {
             // Security: use execFile instead of exec to prevent shell injection
             await execFileAsync("node", [

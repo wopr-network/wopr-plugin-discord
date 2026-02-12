@@ -534,7 +534,7 @@ export async function handleChunk(msg: StreamMessage, streamKey: string): Promis
   if (msg.type === "text" && msg.content) {
     textContent = msg.content;
     logger.debug({ msg: "handleChunk - text content", streamKey, contentLen: textContent.length });
-  } else if (msg.type === "assistant" && (msg as any).message?.content) {
+  } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
     const content = (msg as any).message.content;
     if (Array.isArray(content)) {
       textContent = content.map((c: any) => c.text || "").join("");

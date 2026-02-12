@@ -360,9 +360,10 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
 }
 
 export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
-  if (!ctx.on) return;
+  const ctxAny = ctx as unknown as Record<string, unknown>;
+  if (typeof ctxAny.on !== "function") return;
 
-  ctx.on("stream", (event: SessionStreamEvent) => {
+  (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)("stream", (event: SessionStreamEvent) => {
     const stream = eventBusStreams.get(event.session);
     if (!stream) return;
 
@@ -396,7 +397,7 @@ export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
     let textContent = "";
     if (msg.type === "text" && msg.content) {
       textContent = msg.content;
-    } else if (msg.type === "assistant" && (msg as any).message?.content) {
+    } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
       const content = (msg as any).message.content;
       if (Array.isArray(content)) {
         textContent = content.map((c: any) => c.text || "").join("");
