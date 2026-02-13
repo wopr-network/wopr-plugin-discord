@@ -3,6 +3,7 @@ import {
   DM_CHANNEL_TYPE,
   V15_EVENT_MAP,
   V15_TYPE_RENAMES,
+  ephemeralFlag,
   extractFocusedValue,
   getV15TypeName,
   isDMChannel,
@@ -126,6 +127,20 @@ describe("v15-shim", () => {
       expect(getV15TypeName("Client")).toBeUndefined();
       expect(getV15TypeName("Message")).toBeUndefined();
       expect(getV15TypeName("TextChannel")).toBeUndefined();
+    });
+  });
+
+  describe("ephemeralFlag", () => {
+    it("should return an object with a flags property", () => {
+      const result = ephemeralFlag();
+      // On v14 MessageFlags.Ephemeral is available, so flags path is taken
+      expect(result).toHaveProperty("flags");
+      expect((result as { flags: number }).flags).toBe(64);
+    });
+
+    it("should return a numeric flags value (not a bigint or string)", () => {
+      const result = ephemeralFlag() as { flags: number };
+      expect(typeof result.flags).toBe("number");
     });
   });
 

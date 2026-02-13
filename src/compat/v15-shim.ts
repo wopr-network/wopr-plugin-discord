@@ -11,7 +11,7 @@
  */
 
 import type { Message } from "discord.js";
-import { ChannelType } from "discord.js";
+import { ChannelType, MessageFlags } from "discord.js";
 
 // ---------------------------------------------------------------------------
 // Message#interaction -> Message#interactionMetadata
@@ -139,15 +139,10 @@ export function getV15TypeName(v14TypeName: string): string | undefined {
  */
 export function ephemeralFlag(): { ephemeral: true } | { flags: number } {
   // MessageFlags.Ephemeral = 1 << 6 = 64
-  // Try to use MessageFlags if available (v15), fall back to ephemeral (v14)
-  try {
-    // Dynamic check: if MessageFlags.Ephemeral exists, use flags
-    const { MessageFlags } = require("discord.js");
-    if (MessageFlags?.Ephemeral != null) {
-      return { flags: Number(MessageFlags.Ephemeral) };
-    }
-  } catch {
-    // Fall through to v14 path
+  // Available in both v14 and v15; on v14 ephemeral: true also works,
+  // but using flags is forward-compatible with v15 where ephemeral is removed.
+  if (MessageFlags.Ephemeral != null) {
+    return { flags: Number(MessageFlags.Ephemeral) };
   }
   return { ephemeral: true };
 }

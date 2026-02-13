@@ -25,7 +25,7 @@
  *    - Effort: trivial (property rename)
  *
  * 2. Replace `ephemeral: true` with `flags: MessageFlags.Ephemeral`
- *    - Files: src/slash-commands.ts (12 occurrences)
+ *    - Files: src/slash-commands.ts (14 occurrences)
  *    - Effort: low (search-and-replace with import addition)
  *
  * 3. Replace numeric channel type `=== 1` with `ChannelType.DM`
@@ -163,7 +163,7 @@ export const v15AuditFindings: AuditFinding[] = [
     category: "ephemeral option removal",
     description:
       "The `ephemeral` option in interaction replies is removed in v15. " +
-      "Use `flags: MessageFlags.Ephemeral` instead. This affects 12 reply/followUp calls " +
+      "Use `flags: MessageFlags.Ephemeral` instead. This affects 14 reply/followUp calls " +
       "across slash-commands.ts.",
     currentPattern: "await interaction.reply({ content: '...', ephemeral: true })",
     v15Replacement:
