@@ -14,6 +14,17 @@ import { getSessionKeyFromInteraction } from "./discord-utils.js";
 import { logger } from "./logger.js";
 import { DISCORD_LIMIT } from "./message-streaming.js";
 import type { ChannelCommand, StreamMessage, WOPRPluginContext } from "./types.js";
+import {
+  autocompleteFocusedSchema,
+  modelInputSchema,
+  pairingCodeSchema,
+  sanitize,
+  sessionNameSchema,
+  thinkLevelSchema,
+  usageModeSchema,
+  validateInput,
+  woprMessageSchema,
+} from "./validation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -192,7 +203,12 @@ export class SlashCommandHandler {
 
   async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
     if (interaction.commandName === "model") {
-      const focused = interaction.options.getFocused().toLowerCase();
+      const rawFocused = interaction.options.getFocused();
+      const focusedResult = validateInput(autocompleteFocusedSchema, rawFocused);
+      let focused = "";
+      if (focusedResult.success) {
+        focused = focusedResult.data.toLowerCase();
+      }
       const models = getAllModels(this.ctx);
       const filtered = models
         .filter((m) => m.id.includes(focused) || m.name.toLowerCase().includes(focused) || focused === "")
@@ -274,7 +290,16 @@ export class SlashCommandHandler {
       }
 
       case "think": {
-        const level = interaction.options.getString("level", true);
+        const rawLevel = interaction.options.getString("level", true);
+        const levelResult = validateInput(thinkLevelSchema, rawLevel);
+        if (!levelResult.success) {
+          await interaction.reply({
+            content: `\u274c Invalid thinking level: ${levelResult.error}`,
+            ephemeral: true,
+          });
+          break;
+        }
+        const level = levelResult.data;
         state.thinkingLevel = level;
         const levelEmoji =
           {
@@ -303,7 +328,16 @@ export class SlashCommandHandler {
       }
 
       case "usage": {
-        const mode = interaction.options.getString("mode", true);
+        const rawMode = interaction.options.getString("mode", true);
+        const modeResult = validateInput(usageModeSchema, rawMode);
+        if (!modeResult.success) {
+          await interaction.reply({
+            content: `\u274c Invalid usage mode: ${modeResult.error}`,
+            ephemeral: true,
+          });
+          break;
+        }
+        const mode = modeResult.data;
         state.usageMode = mode;
         await interaction.reply({
           content: `\u{1f4c8} **Usage tracking set to:** ${mode}`,
@@ -313,7 +347,16 @@ export class SlashCommandHandler {
       }
 
       case "session": {
-        const name = interaction.options.getString("name", true);
+        const rawName = sanitize(interaction.options.getString("name", true));
+        const nameResult = validateInput(sessionNameSchema, rawName);
+        if (!nameResult.success) {
+          await interaction.reply({
+            content: `\u274c Invalid session name: ${nameResult.error}\n\nSession names may only contain letters, numbers, hyphens, and underscores.`,
+            ephemeral: true,
+          });
+          break;
+        }
+        const name = nameResult.data;
         const baseKey = getSessionKeyFromInteraction(interaction);
         const newSessionKey = `${baseKey}/${name}`;
         await interaction.reply({
@@ -324,8 +367,16 @@ export class SlashCommandHandler {
       }
 
       case "wopr": {
-        const message = interaction.options.getString("message", true);
-        await this.handleWoprMessage(interaction, message);
+        const rawMessage = sanitize(interaction.options.getString("message", true));
+        const messageResult = validateInput(woprMessageSchema, rawMessage);
+        if (!messageResult.success) {
+          await interaction.reply({
+            content: `\u274c ${messageResult.error}`,
+            ephemeral: true,
+          });
+          break;
+        }
+        await this.handleWoprMessage(interaction, messageResult.data);
         break;
       }
 
@@ -368,8 +419,16 @@ export class SlashCommandHandler {
           break;
         }
 
-        const code = interaction.options.getString("code", true);
-        const result = await this.claimOwnership(code, interaction.user.id, interaction.user.id);
+        const rawCode = sanitize(interaction.options.getString("code", true));
+        const codeResult = validateInput(pairingCodeSchema, rawCode);
+        if (!codeResult.success) {
+          await interaction.reply({
+            content: `\u274c Invalid pairing code: ${codeResult.error}`,
+            ephemeral: true,
+          });
+          break;
+        }
+        const result = await this.claimOwnership(codeResult.data, interaction.user.id, interaction.user.id);
 
         if (result.success) {
           await interaction.reply({
@@ -417,7 +476,16 @@ export class SlashCommandHandler {
       }
 
       case "model": {
-        const modelChoice = interaction.options.getString("model", true);
+        const rawModel = sanitize(interaction.options.getString("model", true));
+        const modelResult = validateInput(modelInputSchema, rawModel);
+        if (!modelResult.success) {
+          await interaction.reply({
+            content: `\u274c Invalid model name: ${modelResult.error}`,
+            ephemeral: true,
+          });
+          break;
+        }
+        const modelChoice = modelResult.data;
 
         const resolved = resolveModel(this.ctx, modelChoice);
         if (!resolved) {
@@ -478,7 +546,7 @@ export class SlashCommandHandler {
           const args: string[] = [];
           for (const option of interaction.options.data) {
             if (option.value !== undefined) {
-              let value = String(option.value);
+              let value = sanitize(String(option.value));
               const mentionMatch = value.match(/^<@!?(\d+)>$/);
               if (mentionMatch && client) {
                 try {

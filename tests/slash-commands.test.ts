@@ -787,4 +787,64 @@ describe("Slash Command System", () => {
       await shutdown();
     });
   });
+
+  // =========================================================================
+  // Input validation (WOP-585)
+  // =========================================================================
+
+  describe("Input validation (WOP-585)", () => {
+    it("/session should reject names with path traversal characters", async () => {
+      const { handleInteraction, shutdown } = await setupPlugin();
+      const interaction = createSlashInteraction("session", { name: "../../../etc/passwd" });
+      await handleInteraction(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining("Invalid session name"),
+          ephemeral: true,
+        }),
+      );
+      await shutdown();
+    });
+
+    it("/claim should reject codes with special characters", async () => {
+      const { handleInteraction, shutdown } = await setupPlugin();
+      const channel = createMockTextChannel({ id: "dm-ch", type: 1 }); // DM
+      const interaction = createSlashInteraction("claim", { code: "ABC!@#$" }, { channel, channelId: channel.id });
+      await handleInteraction(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining("Invalid pairing code"),
+          ephemeral: true,
+        }),
+      );
+      await shutdown();
+    });
+
+    it("/model should reject model names with shell metacharacters", async () => {
+      const { handleInteraction, shutdown } = await setupPlugin();
+      const interaction = createSlashInteraction("model", { model: "opus$(whoami)" });
+      await handleInteraction(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining("Invalid model name"),
+          ephemeral: true,
+        }),
+      );
+      await shutdown();
+    });
+
+    it("/wopr should reject empty messages after sanitization", async () => {
+      const { handleInteraction, shutdown } = await setupPlugin();
+      // A string of only control characters, after sanitize() becomes empty
+      const interaction = createSlashInteraction("wopr", { message: "\x00\x01\x02" });
+      await handleInteraction(interaction);
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: expect.stringContaining("empty"),
+          ephemeral: true,
+        }),
+      );
+      await shutdown();
+    });
+  });
 });
