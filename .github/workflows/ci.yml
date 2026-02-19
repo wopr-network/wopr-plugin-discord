@@ -21,9 +21,11 @@ jobs:
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          cache: true
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Lint (if script exists)
         run: |
@@ -64,9 +66,11 @@ jobs:
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          cache: true
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Build
         run: bun run build
@@ -99,9 +103,11 @@ jobs:
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          cache: true
 
       - name: Install dependencies
-        run: bun install --production
+        run: bun install --frozen-lockfile --production
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -145,9 +151,11 @@ jobs:
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+        with:
+          cache: true
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Test (if script exists)
         run: |
