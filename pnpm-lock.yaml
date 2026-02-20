@@ -25,7 +25,7 @@ importers:
         specifier: ^2.4.3
         version: 2.4.3
       '@types/node':
-        specifier: ^25.2.3
+        specifier: ^25.3.0
         version: 25.3.0
       '@vitest/coverage-istanbul':
         specifier: ^4.0.18
