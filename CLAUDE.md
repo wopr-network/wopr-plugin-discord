@@ -62,3 +62,9 @@ The default export must satisfy `WOPRPlugin`. The plugin receives `WOPRPluginCon
 ## Issue Tracking
 
 All issues in **Linear** (team: WOPR). No GitHub issues. Issue descriptions start with `**Repo:** wopr-network/wopr-plugin-discord`.
+
+## Session Memory
+
+At the start of every WOPR session, **read `~/.wopr-memory.md` if it exists.** It contains recent session context: which repos were active, what branches are in flight, and how many uncommitted changes exist. Use it to orient quickly without re-investigating.
+
+The `Stop` hook writes to this file automatically at session end. Only non-main branches are recorded — if everything is on `main`, nothing is written for that repo.
