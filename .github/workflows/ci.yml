@@ -107,13 +107,16 @@ jobs:
           path: dist/
 
       - name: Validate dist/index.js exists
-        run: test -f dist/index.js && echo "dist/index.js exists" || (echo "Error: dist/index.js not found" && exit 1)
+        run: |
+          test -f dist/index.js && echo "dist/index.js exists" || (echo "Error: dist/index.js not found" && exit 1)
 
       - name: Validate dist/index.d.ts exists
-        run: test -f dist/index.d.ts && echo "dist/index.d.ts exists" || (echo "Error: dist/index.d.ts not found" && exit 1)
+        run: |
+          test -f dist/index.d.ts && echo "dist/index.d.ts exists" || (echo "Error: dist/index.d.ts not found" && exit 1)
 
       - name: Validate ESM import
-        run: node --input-type=module -e "import('./dist/index.js').then(() => console.log('ESM import successful'))"
+        run: |
+          node --input-type=module -e "import('./dist/index.js').then(() => console.log('ESM import successful'))"
 
       - name: Validate npm packaging
         run: npm pack --dry-run && echo "Package configuration valid"
