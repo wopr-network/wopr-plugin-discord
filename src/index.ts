@@ -138,7 +138,9 @@ const plugin: WOPRPlugin = {
         if (subcommand === "claim") {
           const code = rest[0];
           if (!code) {
+            // biome-ignore lint/suspicious/noConsole: CLI output
             console.log("Usage: wopr discord claim <code>");
+            // biome-ignore lint/suspicious/noConsole: CLI output
             console.log("  Claim ownership of the Discord bot using a pairing code");
             process.exit(1);
           }
@@ -157,20 +159,27 @@ const plugin: WOPRPlugin = {
             };
 
             if (result.success) {
+              // biome-ignore lint/suspicious/noConsole: CLI output
               console.log(`\u2713 Discord ownership claimed!`);
+              // biome-ignore lint/suspicious/noConsole: CLI output
               console.log(`  Owner: ${result.username} (${result.userId})`);
               process.exit(0);
             } else {
+              // biome-ignore lint/suspicious/noConsole: CLI output
               console.log(`Failed to claim: ${result.error || "Unknown error"}`);
               process.exit(1);
             }
           } catch (_err) {
+            // biome-ignore lint/suspicious/noConsole: CLI output
             console.log(`Error: Could not connect to WOPR daemon. Is it running?`);
+            // biome-ignore lint/suspicious/noConsole: CLI output
             console.log(`  Start it with: wopr daemon start`);
             process.exit(1);
           }
         } else {
+          // biome-ignore lint/suspicious/noConsole: CLI output
           console.log("Discord plugin commands:");
+          // biome-ignore lint/suspicious/noConsole: CLI output
           console.log("  wopr discord claim <code>  - Claim ownership using a pairing code");
           process.exit(subcommand ? 1 : 0);
         }

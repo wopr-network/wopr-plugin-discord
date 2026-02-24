@@ -23,7 +23,13 @@
         "noUnusedImports": "error"
       },
       "suspicious": {
-        "noExplicitAny": "warn"
+        "noExplicitAny": "warn",
+        "noConsole": {
+          "level": "error",
+          "options": {
+            "allow": ["warn", "error", "info"]
+          }
+        }
       },
       "style": {
         "noNonNullAssertion": "warn",
