@@ -23,6 +23,7 @@ import { DiscordMessageStream, eventBusStreams, handleChunk, streams } from "./m
 import { buildPairingMessage, createPairingRequest, hasOwner } from "./pairing.js";
 import { setMessageReaction } from "./reaction-manager.js";
 import type {
+  CompactMetadata,
   SessionCreateEvent,
   SessionInjectEvent,
   SessionResponseEvent,
@@ -364,7 +365,9 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
 }
 
 export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
-  const ctxAny = ctx as unknown as Record<string, unknown>;
+  const ctxAny = ctx as unknown as {
+    on?: (event: string, handler: (event: SessionStreamEvent) => void) => void;
+  };
   if (typeof ctxAny.on !== "function") return;
 
   (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)(
@@ -389,7 +392,7 @@ export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
       }
 
       if (msg.type === "system" && msg.subtype === "compact_boundary") {
-        const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+        const metadata = msg.metadata as CompactMetadata | undefined;
         if (metadata?.trigger === "auto") {
           let notification = "\u{1f4e6} **Auto-Compaction**\n";
           notification += metadata.pre_tokens

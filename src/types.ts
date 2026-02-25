@@ -61,3 +61,12 @@ export interface ProviderInfo {
   available: boolean;
   models?: string[];
 }
+
+/**
+ * Metadata shape for compact_boundary system messages.
+ * Used when handling auto-compaction notifications in stream consumers.
+ */
+export interface CompactMetadata {
+  pre_tokens?: number;
+  trigger?: string;
+}

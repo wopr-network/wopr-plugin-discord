@@ -8,7 +8,7 @@
 
 import type { DMChannel, Message, TextChannel, ThreadChannel } from "discord.js";
 import { logger } from "./logger.js";
-import type { StreamMessage } from "./types.js";
+import type { CompactMetadata, StreamMessage } from "./types.js";
 
 export const DISCORD_LIMIT = 2000;
 const EDIT_INTERVAL_MS = 1000; // Max 1 edit per second (Discord rate limit: 5 req/5s per channel)
@@ -515,7 +515,7 @@ export async function handleChunk(msg: StreamMessage, streamKey: string): Promis
 
   // Handle system messages (including auto-compaction notifications)
   if (msg.type === "system" && msg.subtype === "compact_boundary") {
-    const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+    const metadata = msg.metadata as CompactMetadata | undefined;
     logger.info({ msg: "handleChunk - auto-compaction detected", streamKey, metadata });
 
     if (metadata?.trigger === "auto") {
