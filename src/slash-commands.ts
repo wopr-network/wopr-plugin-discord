@@ -138,7 +138,9 @@ function getAllModels(ctx: WOPRPluginContext): ResolvedModel[] {
   const results: ResolvedModel[] = [];
   const providerIds = ["anthropic", "openai", "kimi", "opencode", "codex"];
   for (const pid of providerIds) {
-    const provider = (ctx as any)?.getProvider?.(pid);
+    const provider = (ctx as { getProvider?: (id: string) => { supportedModels?: string[] } | null })?.getProvider?.(
+      pid,
+    );
     if (!provider?.supportedModels) continue;
     for (const modelId of provider.supportedModels) {
       results.push({
@@ -630,7 +632,7 @@ export class SlashCommandHandler {
 
       const usage = state.usageMode !== "off" ? `\n\n_Usage: ${state.messageCount} messages_` : "";
       await interaction.editReply((response + usage).slice(0, DISCORD_LIMIT));
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error({ msg: "Slash command inject failed", error: String(error) });
       await interaction.editReply("\u274c Error processing your request.");
     }

@@ -47,14 +47,14 @@ export async function refreshIdentity(ctx: WOPRPluginContext): Promise<void> {
  */
 export async function refreshReactionEmojis(ctx: WOPRPluginContext): Promise<void> {
   try {
-    const config = ctx.getConfig<Record<string, any>>();
+    const config = ctx.getConfig<Record<string, unknown>>();
     if (config) {
       reactionEmojis = {
-        queued: config.emojiQueued || "🕐",
-        active: config.emojiActive || "⚡",
-        done: config.emojiDone || "✅",
-        error: config.emojiError || "❌",
-        cancelled: config.emojiCancelled || "⏹️",
+        queued: (config.emojiQueued as string) || "🕐",
+        active: (config.emojiActive as string) || "⚡",
+        done: (config.emojiDone as string) || "✅",
+        error: (config.emojiError as string) || "❌",
+        cancelled: (config.emojiCancelled as string) || "⏹️",
       };
       logger.info({ msg: "Reaction emojis refreshed", emojis: reactionEmojis });
     }

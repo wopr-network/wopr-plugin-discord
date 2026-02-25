@@ -22,12 +22,13 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promi
   for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
     try {
       return await fn();
-    } catch (err: any) {
-      const isRateLimit = err?.httpStatus === 429 || err?.status === 429;
+    } catch (err: unknown) {
+      const typedErr = err as { httpStatus?: number; status?: number; retryAfter?: number };
+      const isRateLimit = typedErr?.httpStatus === 429 || typedErr?.status === 429;
       if (!isRateLimit || attempt >= RATE_LIMIT_MAX_RETRIES) {
         throw err;
       }
-      const retryAfterMs = (err.retryAfter ?? (attempt + 1) * 2) * 1000;
+      const retryAfterMs = (typedErr.retryAfter ?? (attempt + 1) * 2) * 1000;
       logger.warn({
         msg: "Discord rate limit hit, retrying",
         label,
@@ -534,10 +535,10 @@ export async function handleChunk(msg: StreamMessage, streamKey: string): Promis
   if (msg.type === "text" && msg.content) {
     textContent = msg.content;
     logger.debug({ msg: "handleChunk - text content", streamKey, contentLen: textContent.length });
-  } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
-    const content = (msg as any).message.content;
+  } else if ((msg.type as string) === "assistant" && (msg as { message?: { content?: unknown } }).message?.content) {
+    const content = (msg as { message?: { content?: unknown } }).message?.content;
     if (Array.isArray(content)) {
-      textContent = content.map((c: any) => c.text || "").join("");
+      textContent = content.map((c: { text?: string }) => c.text || "").join("");
     } else if (typeof content === "string") {
       textContent = content;
     }

@@ -67,6 +67,7 @@ export class ChannelQueueManager {
         currentInject: null,
       });
     }
+    // biome-ignore lint/style/noNonNullAssertion: guaranteed by the set() above
     return this.channelQueues.get(channelId)!;
   }
 
@@ -82,6 +83,7 @@ export class ChannelQueueManager {
         model: "claude-sonnet-4-20250514",
       });
     }
+    // biome-ignore lint/style/noNonNullAssertion: guaranteed by the set() above
     return this.sessionStates.get(sessionKey)!;
   }
 

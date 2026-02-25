@@ -71,7 +71,7 @@ export function resolveMentions(message: Message): string {
 
   // Resolve channel mentions: <#CHANNEL_ID> -> #channel-name [CHANNEL_ID]
   for (const [channelId, channel] of message.mentions.channels) {
-    const channelName = (channel as any).name || channelId;
+    const channelName = (channel as { name?: string }).name || channelId;
     content = content.replace(new RegExp(`<#${channelId}>`, "g"), `#${channelName} [${channelId}]`);
   }
 

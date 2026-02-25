@@ -296,13 +296,14 @@ const plugin: WOPRPlugin = {
                 encryptPub: string,
                 signature: string,
                 channelId: string,
-              ) => Promise<{ friend: any; acceptMessage: string }>;
+              ) => Promise<{ friend: { name: string }; acceptMessage: string }>;
               denyFriendRequest?: (from: string, signature: string) => Promise<void>;
             }
           | undefined;
 
         await handleFriendButtonInteraction(
           interaction,
+          // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before this event handler fires
           ctx!,
           client?.user?.username || "unknown",
           async (from: string, pending) => {
@@ -358,6 +359,7 @@ const plugin: WOPRPlugin = {
 
       // Subscribe to session:create after client is ready (needs guild cache)
       if (client) {
+        // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before ClientReady fires
         subscribeSessionCreateEvent(ctx!, client);
       }
     });
