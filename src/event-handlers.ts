@@ -75,7 +75,7 @@ export async function executeInjectInternal(
     logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: authorDisplayName });
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (replyToMessage.channel as any).name },
+      channel: { type: "discord", id: channelId, name: (replyToMessage.channel as { name?: string }).name },
       contextProviders: ["session_system", "skills", "bootstrap_files"],
       onStream: (msg: StreamMessage) => {
         if (cancelToken.cancelled) return;
@@ -93,7 +93,7 @@ export async function executeInjectInternal(
     await setMessageReaction(replyToMessage, REACTION_DONE);
 
     queueManager.clearBuffer(channelId);
-  } catch (error: any) {
+  } catch (error: unknown) {
     const errorStr = String(error);
     const isCancelled =
       cancelToken.cancelled ||
@@ -159,7 +159,7 @@ export async function handleMessage(
   const isBot = message.author.bot;
 
   const authorDisplayName =
-    message.member?.displayName || (message.author as any).displayName || message.author.username;
+    message.member?.displayName || (message.author as { displayName?: string }).displayName || message.author.username;
 
   const resolvedContent = resolveMentions(message);
 
@@ -167,7 +167,7 @@ export async function handleMessage(
   try {
     ctx.logMessage(sessionKey, resolvedContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (message.channel as any).name },
+      channel: { type: "discord", id: channelId, name: (message.channel as { name?: string }).name },
     });
   } catch (_e) {}
 
@@ -245,7 +245,11 @@ export async function handleMessage(
   }
 }
 
-export function handleTypingStart(typing: any, _client: Client, queueManager: ChannelQueueManager): void {
+export function handleTypingStart(
+  typing: { user: { bot: boolean }; channel: { id: string } },
+  _client: Client,
+  queueManager: ChannelQueueManager,
+): void {
   if (typing.user.bot) return;
   queueManager.setHumanTyping(typing.channel.id);
 }
@@ -317,7 +321,7 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
 
   ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
     if (!payload.session.startsWith("discord:")) return;
-    if ((payload as any).channel?.type === "discord") return;
+    if ((payload as { channel?: { type?: string } }).channel?.type === "discord") return;
 
     const stream = eventBusStreams.get(payload.session);
     if (stream) {
@@ -399,10 +403,13 @@ export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
       let textContent = "";
       if (msg.type === "text" && msg.content) {
         textContent = msg.content;
-      } else if ((msg.type as string) === "assistant" && (msg as any).message?.content) {
-        const content = (msg as any).message.content;
+      } else if (
+        (msg.type as string) === "assistant" &&
+        (msg as { message?: { content?: unknown } }).message?.content
+      ) {
+        const content = (msg as { message?: { content?: unknown } }).message?.content;
         if (Array.isArray(content)) {
-          textContent = content.map((c: any) => c.text || "").join("");
+          textContent = content.map((c: { text?: string }) => c.text || "").join("");
         } else if (typeof content === "string") {
           textContent = content;
         }

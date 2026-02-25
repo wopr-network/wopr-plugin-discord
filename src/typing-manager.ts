@@ -102,7 +102,7 @@ export function stopTyping(channelId: string, channel?: TextChannel | ThreadChan
   if (channel) {
     channel
       .send("\u200b")
-      .then((m: any) => m.delete().catch(() => {}))
+      .then((m: { delete: () => Promise<unknown> }) => m.delete().catch(() => {}))
       .catch(() => {});
   }
 }

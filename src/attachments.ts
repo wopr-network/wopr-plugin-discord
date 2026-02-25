@@ -35,7 +35,7 @@ export async function saveAttachments(message: Message): Promise<string[]> {
       }
 
       const fileStream = createWriteStream(filepath);
-      await pipeline(response.body as any, fileStream);
+      await pipeline(response.body as unknown as NodeJS.ReadableStream, fileStream);
 
       savedPaths.push(filepath);
       logger.info({ msg: "Attachment saved", filename, size: attachment.size, contentType: attachment.contentType });
