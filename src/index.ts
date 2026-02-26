@@ -142,6 +142,7 @@ const plugin: WOPRPlugin = {
       capabilities: [{ type: "channel", id: "discord", displayName: "Discord", tier: "byok" }],
     },
     lifecycle: { shutdownBehavior: "graceful" },
+    configSchema,
   },
   commands: [
     {
