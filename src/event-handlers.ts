@@ -415,13 +415,13 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
     }
   };
 
-  ctx.events.on("session:beforeInject", beforeHandler);
-  ctx.events.on("session:afterInject", afterHandler);
+  const unsubBefore = ctx.events.on("session:beforeInject", beforeHandler);
+  const unsubAfter = ctx.events.on("session:afterInject", afterHandler);
   logger.info("Subscribed to session events for Discord delivery (streaming)");
 
   return () => {
-    ctx.events?.off("session:beforeInject", beforeHandler);
-    ctx.events?.off("session:afterInject", afterHandler);
+    unsubBefore();
+    unsubAfter();
   };
 }
 
@@ -557,10 +557,10 @@ export function subscribeSessionCreateEvent(ctx: WOPRPluginContext, client: Clie
     }
   };
 
-  ctx.events.on("session:create", handler);
+  const unsubCreate = ctx.events.on("session:create", handler);
   logger.info("Subscribed to session:create for auto-channel creation");
 
   return () => {
-    ctx.events?.off("session:create", handler);
+    unsubCreate();
   };
 }
