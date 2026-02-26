@@ -72,10 +72,19 @@ export async function executeInjectInternal(
   }
 
   try {
-    logger.info({ msg: "executeInjectInternal - inject starting", sessionKey, streamKey, from: authorDisplayName });
+    logger.info({
+      msg: "executeInjectInternal - inject starting",
+      sessionKey,
+      streamKey,
+      from: authorDisplayName,
+    });
     await ctx.inject(sessionKey, messageContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (replyToMessage.channel as { name?: string }).name },
+      channel: {
+        type: "discord",
+        id: channelId,
+        name: (replyToMessage.channel as { name?: string }).name,
+      },
       contextProviders: ["session_system", "skills", "bootstrap_files"],
       onStream: (msg: StreamMessage) => {
         if (cancelToken.cancelled) return;
@@ -110,7 +119,12 @@ export async function executeInjectInternal(
         await setMessageReaction(replyToMessage, REACTION_CANCELLED);
       } catch (_e) {}
     } else {
-      logger.error({ msg: "executeInjectInternal - inject failed", sessionKey, streamKey, error: errorStr });
+      logger.error({
+        msg: "executeInjectInternal - inject failed",
+        sessionKey,
+        streamKey,
+        error: errorStr,
+      });
       try {
         await stream.finalize();
         streams.delete(streamKey);
@@ -146,7 +160,11 @@ export async function handleMessage(
     const code = createPairingRequest(message.author.id, message.author.username);
     const pairingMessage = buildPairingMessage(code);
     await message.reply(pairingMessage);
-    logger.info({ msg: "Pairing code generated", userId: message.author.id, username: message.author.username });
+    logger.info({
+      msg: "Pairing code generated",
+      userId: message.author.id,
+      username: message.author.username,
+    });
     return;
   }
 
@@ -167,7 +185,11 @@ export async function handleMessage(
   try {
     ctx.logMessage(sessionKey, resolvedContent, {
       from: authorDisplayName,
-      channel: { type: "discord", id: channelId, name: (message.channel as { name?: string }).name },
+      channel: {
+        type: "discord",
+        id: channelId,
+        name: (message.channel as { name?: string }).name,
+      },
     });
   } catch (_e) {}
 
@@ -201,7 +223,12 @@ export async function handleMessage(
       isBot: true,
       queuedAt: Date.now(),
     });
-    logger.info({ msg: "Bot @mention queued", channelId, botId: message.author.id, authorDisplayName });
+    logger.info({
+      msg: "Bot @mention queued",
+      channelId,
+      botId: message.author.id,
+      authorDisplayName,
+    });
     return;
   }
 
@@ -220,7 +247,11 @@ export async function handleMessage(
       if (attachmentPaths.length > 0) {
         const attachmentInfo = attachmentPaths.map((p) => `[Attachment: ${p}]`).join("\n");
         messageContent = messageContent ? `${messageContent}\n\n${attachmentInfo}` : attachmentInfo;
-        logger.info({ msg: "Attachments appended to message", count: attachmentPaths.length, channelId });
+        logger.info({
+          msg: "Attachments appended to message",
+          count: attachmentPaths.length,
+          channelId,
+        });
       }
     }
 
@@ -231,7 +262,11 @@ export async function handleMessage(
 
     const fullMessage = bufferContext + messageContent;
 
-    logger.info({ msg: "Human @mention - queueing (priority)", channelId, hasContext: bufferContext.length > 0 });
+    logger.info({
+      msg: "Human @mention - queueing (priority)",
+      channelId,
+      hasContext: bufferContext.length > 0,
+    });
 
     queueManager.queueInject(channelId, {
       sessionKey,
@@ -258,19 +293,26 @@ export function handleTypingStart(
 // Event Bus Subscriptions
 // ============================================================================
 
-export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): void {
-  if (!ctx.events) return;
+export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): () => void {
+  if (!ctx.events) return () => {};
 
-  ctx.events.on("session:beforeInject", async (payload: SessionInjectEvent) => {
+  const beforeHandler = async (payload: SessionInjectEvent) => {
     if (!payload.session.startsWith("discord:")) return;
     if (!payload.message) return;
     if (payload.channel?.type === "discord") return;
 
-    logger.info({ msg: "Session inject for Discord (streaming)", session: payload.session, from: payload.from });
+    logger.info({
+      msg: "Session inject for Discord (streaming)",
+      session: payload.session,
+      from: payload.from,
+    });
 
     const channelId = findChannelIdFromConversationLog(payload.session);
     if (!channelId) {
-      logger.warn({ msg: "Could not find Discord channel ID for inject", session: payload.session });
+      logger.warn({
+        msg: "Could not find Discord channel ID for inject",
+        session: payload.session,
+      });
       return;
     }
 
@@ -288,7 +330,11 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
     try {
       const channel = await client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !("send" in channel)) {
-        logger.warn({ msg: "Channel not sendable for streaming", session: payload.session, channelId });
+        logger.warn({
+          msg: "Channel not sendable for streaming",
+          session: payload.session,
+          channelId,
+        });
         return;
       }
       const notificationMsg = await (channel as TextChannel | ThreadChannel | DMChannel).send(
@@ -317,9 +363,9 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
         error: String(err),
       });
     }
-  });
+  };
 
-  ctx.events.on("session:afterInject", async (payload: SessionResponseEvent) => {
+  const afterHandler = async (payload: SessionResponseEvent) => {
     if (!payload.session.startsWith("discord:")) return;
     if ((payload as { channel?: { type?: string } }).channel?.type === "discord") return;
 
@@ -341,11 +387,19 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
         });
       }
       await stream.finalize().catch((err) => {
-        logger.error({ msg: "Failed to finalize event bus stream", session: payload.session, error: String(err) });
+        logger.error({
+          msg: "Failed to finalize event bus stream",
+          session: payload.session,
+          error: String(err),
+        });
       });
       eventBusStreams.delete(payload.session);
     } else if (payload.response) {
-      logger.info({ msg: "No stream, falling back to bulk send", session: payload.session, from: payload.from });
+      logger.info({
+        msg: "No stream, falling back to bulk send",
+        session: payload.session,
+        from: payload.from,
+      });
       const channelId = findChannelIdFromConversationLog(payload.session);
       if (channelId) {
         try {
@@ -359,74 +413,88 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
         }
       }
     }
-  });
+  };
+
+  const unsubBefore = ctx.events.on("session:beforeInject", beforeHandler);
+  const unsubAfter = ctx.events.on("session:afterInject", afterHandler);
   logger.info("Subscribed to session events for Discord delivery (streaming)");
+
+  return () => {
+    unsubBefore();
+    unsubAfter();
+  };
 }
 
-export function subscribeStreamEvents(ctx: WOPRPluginContext): void {
+export function subscribeStreamEvents(ctx: WOPRPluginContext): () => void {
   const ctxAny = ctx as unknown as Record<string, unknown>;
-  if (typeof ctxAny.on !== "function") return;
+  if (typeof ctxAny.on !== "function") return () => {};
 
-  (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)(
-    "stream",
-    (event: SessionStreamEvent) => {
-      const stream = eventBusStreams.get(event.session);
-      if (!stream) return;
+  const handler = (event: SessionStreamEvent) => {
+    const stream = eventBusStreams.get(event.session);
+    if (!stream) return;
 
-      const msg = event.message;
+    const msg = event.message;
 
-      if (msg.type === "complete" || msg.type === "error") {
-        logger.info({ msg: "Event bus stream complete, finalizing", session: event.session, type: msg.type });
-        eventBusStreams.delete(event.session);
-        stream.finalize().catch((err) => {
-          logger.error({
-            msg: "Failed to finalize event bus stream on complete",
-            session: event.session,
-            error: String(err),
-          });
+    if (msg.type === "complete" || msg.type === "error") {
+      logger.info({
+        msg: "Event bus stream complete, finalizing",
+        session: event.session,
+        type: msg.type,
+      });
+      eventBusStreams.delete(event.session);
+      stream.finalize().catch((err) => {
+        logger.error({
+          msg: "Failed to finalize event bus stream on complete",
+          session: event.session,
+          error: String(err),
         });
-        return;
-      }
+      });
+      return;
+    }
 
-      if (msg.type === "system" && msg.subtype === "compact_boundary") {
-        const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
-        if (metadata?.trigger === "auto") {
-          let notification = "\u{1f4e6} **Auto-Compaction**\n";
-          notification += metadata.pre_tokens
-            ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
-            : "Context has been automatically compressed";
-          stream.append(`\n\n${notification}\n\n`);
-        }
-        return;
+    if (msg.type === "system" && msg.subtype === "compact_boundary") {
+      const metadata = msg.metadata as { pre_tokens?: number; trigger?: string } | undefined;
+      if (metadata?.trigger === "auto") {
+        let notification = "\u{1f4e6} **Auto-Compaction**\n";
+        notification += metadata.pre_tokens
+          ? `Context compressed from ~${Math.round(metadata.pre_tokens / 1000)}k tokens`
+          : "Context has been automatically compressed";
+        stream.append(`\n\n${notification}\n\n`);
       }
+      return;
+    }
 
-      let textContent = "";
-      if (msg.type === "text" && msg.content) {
-        textContent = msg.content;
-      } else if (
-        (msg.type as string) === "assistant" &&
-        (msg as { message?: { content?: unknown } }).message?.content
-      ) {
-        const content = (msg as { message?: { content?: unknown } }).message?.content;
-        if (Array.isArray(content)) {
-          textContent = content.map((c: { text?: string }) => c.text || "").join("");
-        } else if (typeof content === "string") {
-          textContent = content;
-        }
+    let textContent = "";
+    if (msg.type === "text" && msg.content) {
+      textContent = msg.content;
+    } else if ((msg.type as string) === "assistant" && (msg as { message?: { content?: unknown } }).message?.content) {
+      const content = (msg as { message?: { content?: unknown } }).message?.content;
+      if (Array.isArray(content)) {
+        textContent = content.map((c: { text?: string }) => c.text || "").join("");
+      } else if (typeof content === "string") {
+        textContent = content;
       }
+    }
 
-      if (textContent) {
-        stream.append(textContent);
-      }
-    },
-  );
+    if (textContent) {
+      stream.append(textContent);
+    }
+  };
+
+  (ctxAny.on as (event: string, handler: (event: SessionStreamEvent) => void) => void)("stream", handler);
   logger.info("Subscribed to stream events for Discord streaming");
+
+  return () => {
+    if (typeof (ctxAny as Record<string, unknown>).off === "function") {
+      (ctxAny.off as (event: string, handler: (event: SessionStreamEvent) => void) => void)("stream", handler);
+    }
+  };
 }
 
-export function subscribeSessionCreateEvent(ctx: WOPRPluginContext, client: Client): void {
-  if (!ctx.events) return;
+export function subscribeSessionCreateEvent(ctx: WOPRPluginContext, client: Client): () => void {
+  if (!ctx.events) return () => {};
 
-  ctx.events.on("session:create", async (payload: SessionCreateEvent) => {
+  const handler = async (payload: SessionCreateEvent) => {
     const sessionName = payload.session;
 
     const match = sessionName.match(/^discord:([^:]+):#(.+)$/);
@@ -487,6 +555,12 @@ export function subscribeSessionCreateEvent(ctx: WOPRPluginContext, client: Clie
     } catch (err) {
       logger.error({ msg: "Failed to create Discord channel", channelName, error: String(err) });
     }
-  });
+  };
+
+  const unsubCreate = ctx.events.on("session:create", handler);
   logger.info("Subscribed to session:create for auto-channel creation");
+
+  return () => {
+    unsubCreate();
+  };
 }

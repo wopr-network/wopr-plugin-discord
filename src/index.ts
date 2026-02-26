@@ -34,6 +34,7 @@ import type { ConfigSchema, WOPRPlugin, WOPRPluginContext } from "./types.js";
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
 let queueManager: ChannelQueueManager | null = null;
+const cleanups: Array<() => void> = [];
 
 // ============================================================================
 // Config Schema
@@ -49,6 +50,7 @@ const configSchema: ConfigSchema = {
       label: "Discord Bot Token",
       placeholder: "Bot token from Discord Developer Portal",
       required: true,
+      secret: true,
       description: "Your Discord bot token",
     },
     {
@@ -127,6 +129,21 @@ const plugin: WOPRPlugin = {
   name: "wopr-plugin-discord",
   version: "2.11.0",
   description: "Discord bot with slash commands and identity support",
+  manifest: {
+    name: "wopr-plugin-discord",
+    version: "2.11.0",
+    description: "Discord bot with slash commands and identity support",
+    capabilities: ["channel"],
+    category: "channel",
+    tags: ["discord", "chat", "bot", "messaging"],
+    icon: "💬",
+    requires: {},
+    provides: {
+      capabilities: [{ type: "channel", id: "discord", displayName: "Discord", tier: "byok" }],
+    },
+    lifecycle: { shutdownBehavior: "graceful" },
+    configSchema,
+  },
   commands: [
     {
       name: "discord",
@@ -232,7 +249,11 @@ const plugin: WOPRPlugin = {
 
     // 8. Load config and create Discord client
     let config = ctx.getConfig<{ token?: string; guildId?: string; clientId?: string }>();
-    const mainDiscordConfig = ctx.getMainConfig("discord") as { token?: string; clientId?: string; guildId?: string };
+    const mainDiscordConfig = ctx.getMainConfig("discord") as {
+      token?: string;
+      clientId?: string;
+      guildId?: string;
+    };
     if (!config?.token && mainDiscordConfig?.token) {
       config = { ...config, token: mainDiscordConfig.token };
     }
@@ -264,8 +285,8 @@ const plugin: WOPRPlugin = {
     setChannelProviderClient(client);
 
     // Subscribe session/stream events now that client exists
-    subscribeSessionEvents(ctx, client);
-    subscribeStreamEvents(ctx);
+    cleanups.push(subscribeSessionEvents(ctx, client));
+    cleanups.push(subscribeStreamEvents(ctx));
 
     // 9. Register event handlers
     client.on(Events.MessageCreate, (m) => {
@@ -315,7 +336,11 @@ const plugin: WOPRPlugin = {
                 pending.signature,
                 pending.channelId,
               );
-              logger.info({ msg: "Friend request accepted via button", from, friend: result.friend.name });
+              logger.info({
+                msg: "Friend request accepted via button",
+                from,
+                friend: result.friend.name,
+              });
               return result.acceptMessage;
             } else {
               logger.warn({ msg: "P2P extension not available - cannot complete friendship" });
@@ -360,7 +385,7 @@ const plugin: WOPRPlugin = {
       // Subscribe to session:create after client is ready (needs guild cache)
       if (client) {
         // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before ClientReady fires
-        subscribeSessionCreateEvent(ctx!, client);
+        cleanups.push(subscribeSessionCreateEvent(ctx!, client));
       }
     });
 
@@ -373,6 +398,15 @@ const plugin: WOPRPlugin = {
     }
   },
   async shutdown() {
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+    cleanups.length = 0;
+
     if (queueManager) {
       queueManager.stopProcessing();
       queueManager = null;
@@ -383,9 +417,14 @@ const plugin: WOPRPlugin = {
     if (ctx?.unregisterExtension) {
       ctx.unregisterExtension("discord");
     }
+    if (ctx?.unregisterConfigSchema) {
+      ctx.unregisterConfigSchema("wopr-plugin-discord");
+    }
     if (client) await client.destroy();
     setReactionClient(null);
     setChannelProviderClient(null);
+    client = null;
+    ctx = null;
   },
 };
 
