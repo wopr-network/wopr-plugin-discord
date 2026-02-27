@@ -114,6 +114,13 @@ const configSchema: ConfigSchema = {
       default: "\u23f9\ufe0f",
       description: "Emoji shown when cancelled",
     },
+    {
+      name: "useComponentsV2",
+      type: "boolean",
+      label: "Use Components v2",
+      default: false,
+      description: "Enable Discord Components v2 message layout (Containers, Sections). Cannot mix with legacy embeds.",
+    },
     // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
     { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },
     // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
