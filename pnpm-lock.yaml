@@ -10,7 +10,7 @@ importers:
     dependencies:
       '@wopr-network/plugin-types':
         specifier: ^0.7.0
-        version: 0.7.0(zod@3.25.76)
+        version: 0.7.0(zod@4.3.6)
       discord.js:
         specifier: ^14.14.1
         version: 14.25.1
@@ -18,8 +18,8 @@ importers:
         specifier: ^3.19.0
         version: 3.19.0
       zod:
-        specifier: ^3.23.0
-        version: 3.25.76
+        specifier: ^4.3.6
+        version: 4.3.6
     devDependencies:
       '@biomejs/biome':
         specifier: ^2.4.3
@@ -2138,8 +2138,8 @@ packages:
     resolution: {integrity: sha512-CzhO+pFNo8ajLM2d2IW/R93ipy99LWjtwblvC1RsoSUMZgyLbYFr221TnSNT7GjGdYui6P459mw9JH/g/zW2ug==}
     engines: {node: '>=18'}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
 
 snapshots:
 
@@ -2798,9 +2798,9 @@ snapshots:
 
   '@vladfrangu/async_event_emitter@2.4.7': {}
 
-  '@wopr-network/plugin-types@0.7.0(zod@3.25.76)':
+  '@wopr-network/plugin-types@0.7.0(zod@4.3.6)':
     dependencies:
-      zod: 3.25.76
+      zod: 4.3.6
 
   '@wopr-network/semantic-release-config@1.0.0(semantic-release@24.2.9(typescript@5.9.3))':
     dependencies:
@@ -4109,4 +4109,4 @@ snapshots:
 
   yoctocolors@2.1.2: {}
 
-  zod@3.25.76: {}
+  zod@4.3.6: {}
