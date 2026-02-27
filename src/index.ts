@@ -139,7 +139,7 @@ const plugin: WOPRPlugin = {
     icon: "💬",
     requires: {},
     provides: {
-      capabilities: [{ type: "channel", id: "discord", displayName: "Discord", tier: "byok" }],
+      capabilities: [{ type: "channel", id: "discord", displayName: "Discord" }],
     },
     lifecycle: { shutdownBehavior: "graceful" },
     configSchema,
@@ -206,6 +206,32 @@ const plugin: WOPRPlugin = {
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
+
+    // Register setup context provider for conversational setup
+    if (ctx.registerSetupContextProvider) {
+      ctx.registerSetupContextProvider(({ partialConfig }) => {
+        const hasToken = !!partialConfig.token;
+        const hasClientId = !!partialConfig.clientId;
+
+        let instructions = `You are helping the user set up the Discord plugin for WOPR.\n\n## Discord Bot Setup Guide\n\n`;
+
+        if (!hasToken) {
+          instructions += `### Step 1: Create a Discord Bot\n1. Go to https://discord.com/developers/applications\n2. Click "New Application" and give it a name (e.g., "WOPR Bot")\n3. Go to the "Bot" tab in the left sidebar\n4. Click "Reset Token" to generate a new bot token\n5. Copy the token — you will need to paste it here\n6. Under "Privileged Gateway Intents", enable:\n   - MESSAGE CONTENT INTENT\n   - SERVER MEMBERS INTENT (optional, for user lookup)\n\nAsk the user to paste their bot token.\n`;
+        } else {
+          instructions += `### Step 1: Bot Token\nBot token is already configured. Moving on.\n\n`;
+        }
+
+        if (!hasClientId) {
+          instructions += `### Step 2: Get the Application ID\n1. On the Discord Developer Portal, go to "General Information"\n2. Copy the "Application ID" (also called Client ID)\n3. Paste it here\n\nAsk the user for their Application ID.\n`;
+        } else {
+          instructions += `### Step 2: Application ID\nApplication ID is already configured. Moving on.\n\n`;
+        }
+
+        instructions += `### Step 3: Invite the Bot to a Server\n1. Go to the "OAuth2" tab, then "URL Generator"\n2. Select scopes: \`bot\`, \`applications.commands\`\n3. Select permissions: Send Messages, Read Message History, Add Reactions, Use Slash Commands\n4. Copy the generated URL and open it in a browser\n5. Select the server to add the bot to\n\nAsk the user to confirm they have invited the bot to their server.\n\n### Step 4: (Optional) Guild ID\nIf the user wants to restrict the bot to a single server, ask for the server's Guild ID.\nRight-click the server name in Discord > Copy Server ID (requires Developer Mode in Discord settings).\n`;
+
+        return instructions;
+      });
+    }
 
     // 1. Create queue manager
     queueManager = new ChannelQueueManager((item, cancelToken) => {
@@ -410,6 +436,9 @@ const plugin: WOPRPlugin = {
     if (queueManager) {
       queueManager.stopProcessing();
       queueManager = null;
+    }
+    if (ctx?.unregisterSetupContextProvider) {
+      ctx.unregisterSetupContextProvider();
     }
     if (ctx?.unregisterChannelProvider) {
       ctx.unregisterChannelProvider("discord");
