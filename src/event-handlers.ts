@@ -60,9 +60,11 @@ export async function executeInjectInternal(
   const state = queueManager.getSessionState(sessionKey);
   state.messageCount++;
 
+  const pluginConfig = ctx.getConfig<{ useComponentsV2?: boolean }>();
   const stream = new DiscordMessageStream(
     replyToMessage.channel as TextChannel | ThreadChannel | DMChannel,
     replyToMessage,
+    { useComponentsV2: pluginConfig.useComponentsV2 ?? false },
   );
   streams.set(streamKey, stream);
 
@@ -353,7 +355,10 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
         eventBusStreams.delete(payload.session);
       }
 
-      const stream = new DiscordMessageStream(channel as TextChannel | ThreadChannel | DMChannel, notificationMsg);
+      const eventBusConfig = ctx.getConfig<{ useComponentsV2?: boolean }>();
+      const stream = new DiscordMessageStream(channel as TextChannel | ThreadChannel | DMChannel, notificationMsg, {
+        useComponentsV2: eventBusConfig?.useComponentsV2 ?? false,
+      });
       eventBusStreams.set(payload.session, stream);
     } catch (err) {
       logger.error({

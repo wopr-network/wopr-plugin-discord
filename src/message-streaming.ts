@@ -6,9 +6,25 @@
  * registry (keyed by Discord message ID) and the handleChunk function.
  */
 
-import type { DMChannel, Message, TextChannel, ThreadChannel } from "discord.js";
+import type {
+  DMChannel,
+  Message,
+  MessageCreateOptions,
+  MessageEditOptions,
+  TextChannel,
+  ThreadChannel,
+} from "discord.js";
+import { textToComponentsV2, textToComponentsV2Edit } from "./components-v2.js";
 import { logger } from "./logger.js";
 import type { StreamMessage } from "./types.js";
+
+export interface MessageUnitOptions {
+  useComponentsV2?: boolean;
+}
+
+export interface StreamOptions {
+  useComponentsV2?: boolean;
+}
 
 export const DISCORD_LIMIT = 2000;
 const EDIT_INTERVAL_MS = 1000; // Max 1 edit per second (Discord rate limit: 5 req/5s per channel)
@@ -48,6 +64,9 @@ type MessageState =
   | { status: "sent"; content: string; discordMsg: Message; lastEditLength: number }
   | { status: "finalized" };
 
+type SendPayload = string | MessageCreateOptions;
+type EditPayload = string | MessageEditOptions;
+
 /**
  * Manages a single Discord message's lifecycle with edit-in-place support.
  * Uses explicit state machine to prevent race conditions.
@@ -58,12 +77,19 @@ export class DiscordMessageUnit {
   private readonly replyTo: Message;
   private readonly isReply: boolean;
   private readonly unitId: string;
+  private readonly useComponentsV2: boolean;
   private _overflow: string = ""; // Content that didn't fit after a split
 
-  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message, isReply: boolean) {
+  constructor(
+    channel: TextChannel | ThreadChannel | DMChannel,
+    replyTo: Message,
+    isReply: boolean,
+    options?: MessageUnitOptions,
+  ) {
     this.channel = channel;
     this.replyTo = replyTo;
     this.isReply = isReply;
+    this.useComponentsV2 = options?.useComponentsV2 ?? false;
     this.unitId = Math.random().toString(36).slice(2, 8);
     logger.debug({ msg: "DiscordMessageUnit created", unitId: this.unitId, isReply });
   }
@@ -153,8 +179,9 @@ export class DiscordMessageUnit {
 
     logger.debug({ msg: "Unit.sendInitial", unitId: this.unitId, contentLen: content.length, isReply: this.isReply });
 
+    const payload: SendPayload = this.useComponentsV2 ? textToComponentsV2(content) : content;
     const promise = withRateLimitRetry(
-      () => (this.isReply ? this.replyTo.reply(content) : this.channel.send(content)) as Promise<Message>,
+      () => (this.isReply ? this.replyTo.reply(payload) : this.channel.send(payload)) as Promise<Message>,
       `sendInitial:${this.unitId}`,
     );
     this.state = { status: "sending", content, promise };
@@ -176,7 +203,8 @@ export class DiscordMessageUnit {
 
     logger.debug({ msg: "Unit.editExisting", unitId: this.unitId, contentLen: content.length });
     const discordMsg = this.state.discordMsg;
-    await withRateLimitRetry(() => discordMsg.edit(content), `editExisting:${this.unitId}`);
+    const payload: EditPayload = this.useComponentsV2 ? textToComponentsV2Edit(content) : content;
+    await withRateLimitRetry(() => discordMsg.edit(payload), `editExisting:${this.unitId}`);
     this.state = { ...this.state, content, lastEditLength: content.length };
     logger.debug({ msg: "Unit.editExisting success", unitId: this.unitId });
     return "ok";
@@ -201,8 +229,9 @@ export class DiscordMessageUnit {
     });
 
     if (this.state.status === "buffering") {
+      const sendPayload: SendPayload = this.useComponentsV2 ? textToComponentsV2(toSend) : toSend;
       const promise = withRateLimitRetry(
-        () => (this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend)) as Promise<Message>,
+        () => (this.isReply ? this.replyTo.reply(sendPayload) : this.channel.send(sendPayload)) as Promise<Message>,
         `handleOverflow:send:${this.unitId}`,
       );
       this.state = { status: "sending", content: toSend, promise };
@@ -218,7 +247,8 @@ export class DiscordMessageUnit {
       }
     } else if (this.state.status === "sent") {
       const sentMsg = this.state.discordMsg;
-      await withRateLimitRetry(() => sentMsg.edit(toSend), `handleOverflow:edit:${this.unitId}`);
+      const editPayload: EditPayload = this.useComponentsV2 ? textToComponentsV2Edit(toSend) : toSend;
+      await withRateLimitRetry(() => sentMsg.edit(editPayload), `handleOverflow:edit:${this.unitId}`);
       this.state = { status: "finalized" };
       logger.debug({ msg: "Unit.handleOverflow edited and finalized", unitId: this.unitId });
     }
@@ -282,7 +312,8 @@ export class DiscordMessageUnit {
         logger.debug({ msg: "Unit.finalize editing sent message", unitId: this.unitId, contentLen: content.length });
         const sentMsg = prevState.discordMsg;
         const finalContent = content.slice(0, DISCORD_LIMIT);
-        await withRateLimitRetry(() => sentMsg.edit(finalContent), `finalize:edit:${this.unitId}`);
+        const editPayload: EditPayload = this.useComponentsV2 ? textToComponentsV2Edit(finalContent) : finalContent;
+        await withRateLimitRetry(() => sentMsg.edit(editPayload), `finalize:edit:${this.unitId}`);
         logger.debug({ msg: "Unit.finalize edit success", unitId: this.unitId });
       } else if (prevState.status === "buffering") {
         logger.debug({
@@ -292,8 +323,9 @@ export class DiscordMessageUnit {
           isReply: this.isReply,
         });
         const finalContent = content.slice(0, DISCORD_LIMIT);
+        const sendPayload: SendPayload = this.useComponentsV2 ? textToComponentsV2(finalContent) : finalContent;
         const msg = await withRateLimitRetry(
-          () => (this.isReply ? this.replyTo.reply(finalContent) : this.channel.send(finalContent)) as Promise<Message>,
+          () => (this.isReply ? this.replyTo.reply(sendPayload) : this.channel.send(sendPayload)) as Promise<Message>,
           `finalize:send:${this.unitId}`,
         );
         logger.debug({ msg: "Unit.finalize send success", unitId: this.unitId, msgId: msg.id });
@@ -314,6 +346,7 @@ export class DiscordMessageStream {
   private readonly channel: TextChannel | ThreadChannel | DMChannel;
   private readonly replyTo: Message;
   private readonly streamId: string;
+  private readonly options: StreamOptions;
 
   private lastAppendTime = Date.now();
   private flushTimer: NodeJS.Timeout | null = null;
@@ -321,11 +354,14 @@ export class DiscordMessageStream {
   private processing = false;
   private finalized = false;
 
-  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message) {
+  constructor(channel: TextChannel | ThreadChannel | DMChannel, replyTo: Message, options?: StreamOptions) {
     this.channel = channel;
     this.replyTo = replyTo;
+    this.options = options ?? {};
     this.streamId = Math.random().toString(36).slice(2, 8);
-    this.currentUnit = new DiscordMessageUnit(channel, replyTo, true);
+    this.currentUnit = new DiscordMessageUnit(channel, replyTo, true, {
+      useComponentsV2: this.options.useComponentsV2,
+    });
     logger.info({ msg: "Stream created", streamId: this.streamId, channelId: channel.id });
 
     this.flushTimer = setInterval(() => this.processPending(), EDIT_INTERVAL_MS);
@@ -376,7 +412,9 @@ export class DiscordMessageStream {
         });
         await this.currentUnit.finalize();
         this.completedUnits.push(this.currentUnit);
-        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
+        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false, {
+          useComponentsV2: this.options.useComponentsV2,
+        });
       }
 
       this.currentUnit.append(batch);
@@ -409,7 +447,9 @@ export class DiscordMessageStream {
         const overflow = this.currentUnit.overflow;
         logger.info({ msg: "Stream overflow split", streamId: this.streamId, overflowLen: overflow.length });
         this.completedUnits.push(this.currentUnit);
-        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false);
+        this.currentUnit = new DiscordMessageUnit(this.channel, this.replyTo, false, {
+          useComponentsV2: this.options.useComponentsV2,
+        });
 
         if (overflow.length > 0) {
           this.currentUnit.append(overflow);
