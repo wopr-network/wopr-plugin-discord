@@ -437,6 +437,9 @@ const plugin: WOPRPlugin = {
       queueManager.stopProcessing();
       queueManager = null;
     }
+    if (ctx?.unregisterSetupContextProvider) {
+      ctx.unregisterSetupContextProvider();
+    }
     if (ctx?.unregisterChannelProvider) {
       ctx.unregisterChannelProvider("discord");
     }
