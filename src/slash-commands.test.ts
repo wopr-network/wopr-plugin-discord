@@ -10,7 +10,6 @@ vi.mock("./discord-utils.js", () => ({
   getSessionKeyFromInteraction: vi.fn(() => "discord:test-guild:#general"),
   getSessionKey: vi.fn(() => "discord:test-guild:#general"),
   resolveMentions: vi.fn((msg: any) => msg.content),
-  findChannelIdFromConversationLog: vi.fn(() => null),
 }));
 
 // Mock child_process to prevent real exec calls

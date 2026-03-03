@@ -182,6 +182,11 @@ export function createMockContext(
     getChannelProviders: vi.fn().mockReturnValue([]),
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     storage: { getTable: vi.fn(), listTables: vi.fn() },
+    session: {
+      getContext: vi.fn().mockResolvedValue(null),
+      setContext: vi.fn().mockResolvedValue(undefined),
+      readConversationLog: vi.fn().mockResolvedValue([]),
+    },
     getPluginDir: vi.fn().mockReturnValue("/tmp/test-plugin"),
   };
   return ctx;

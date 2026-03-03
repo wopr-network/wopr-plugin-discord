@@ -19,7 +19,6 @@ vi.mock("./discord-utils.js", () => ({
   getSessionKey: vi.fn(() => "discord:test-guild:#general"),
   getSessionKeyFromInteraction: vi.fn(() => "discord:test-guild:#general"),
   resolveMentions: vi.fn((msg: any) => msg.content),
-  findChannelIdFromConversationLog: vi.fn(() => "ch-1"),
 }));
 
 vi.mock("./identity-manager.js", () => ({
@@ -73,12 +72,14 @@ import { handleRegisteredCommand, handleRegisteredParsers } from "./channel-prov
 import { ChannelQueueManager } from "./channel-queue.js";
 import {
   executeInjectInternal,
+  findChannelIdFromSession,
   handleMessage,
   handleTypingStart,
   subscribeSessionCreateEvent,
   subscribeSessionEvents,
   subscribeStreamEvents,
 } from "./event-handlers.js";
+import { logger } from "./logger.js";
 import { hasOwner } from "./pairing.js";
 import { setMessageReaction } from "./reaction-manager.js";
 import { startTyping, stopTyping } from "./typing-manager.js";
@@ -425,5 +426,53 @@ describe("subscribeSessionCreateEvent", () => {
     const client = createMockClient();
     subscribeSessionCreateEvent(ctx, client);
     // No error thrown
+  });
+});
+
+describe("findChannelIdFromSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should return channel ID from most recent discord entry", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([
+      { ts: 1000, from: "user", content: "old", type: "message", channel: { id: "ch-old", type: "discord" } },
+      { ts: 2000, from: "user", content: "new", type: "message", channel: { id: "ch-new", type: "discord" } },
+    ]);
+    const result = await findChannelIdFromSession(ctx, "discord:test:#general");
+    expect(result).toBe("ch-new");
+  });
+
+  it("should return null when no discord channel entries exist", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi
+      .fn()
+      .mockResolvedValue([{ ts: 1000, from: "user", content: "msg", type: "message" }]);
+    const result = await findChannelIdFromSession(ctx, "discord:test:#general");
+    expect(result).toBeNull();
+  });
+
+  it("should return null when session has no messages", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([]);
+    const result = await findChannelIdFromSession(ctx, "discord:test:#general");
+    expect(result).toBeNull();
+  });
+
+  it("should return null and log warning when ctx.session is unavailable", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session = undefined;
+    const result = await findChannelIdFromSession(ctx, "discord:test:#general");
+    expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "discord:test:#general" }));
+  });
+
+  it("should return null and log error when readConversationLog throws", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockRejectedValue(new Error("DB error"));
+    const result = await findChannelIdFromSession(ctx, "discord:test:#general");
+    expect(result).toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "discord:test:#general" }));
   });
 });
