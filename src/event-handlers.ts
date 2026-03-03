@@ -39,7 +39,7 @@ import { startTyping, stopTyping, tickTyping } from "./typing-manager.js";
 /** Minimal interface for ctx.session (added by WOP-1538). */
 interface CtxWithSession {
   session?: {
-    readConversationLog?: (sessionName: string) => Promise<Array<{ channel?: { id: string; type: string } }>>;
+    readConversationLog?: (sessionName: string) => Promise<Array<{ channel?: { id: unknown; type: unknown } }>>;
   };
 }
 
@@ -62,7 +62,12 @@ export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionNa
     }
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
-      if (entry.channel?.type === "discord" && entry.channel?.id) {
+      if (
+        entry.channel?.type === "discord" &&
+        entry.channel?.id &&
+        typeof entry.channel.id === "string" &&
+        entry.channel.id.length > 0
+      ) {
         logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
         return entry.channel.id;
       }
