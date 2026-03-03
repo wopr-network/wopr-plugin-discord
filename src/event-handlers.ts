@@ -16,7 +16,7 @@ import {
 import { saveAttachments } from "./attachments.js";
 import { discordChannelProvider, handleRegisteredCommand, handleRegisteredParsers } from "./channel-provider.js";
 import type { ChannelQueueManager, QueuedInject } from "./channel-queue.js";
-import { findChannelIdFromConversationLog, getSessionKey, resolveMentions } from "./discord-utils.js";
+import { getSessionKey, resolveMentions } from "./discord-utils.js";
 import { REACTION_ACTIVE, REACTION_CANCELLED, REACTION_DONE, REACTION_ERROR } from "./identity-manager.js";
 import { logger } from "./logger.js";
 import { DiscordMessageStream, eventBusStreams, handleChunk, streams } from "./message-streaming.js";
@@ -31,6 +31,45 @@ import type {
   WOPRPluginContext,
 } from "./types.js";
 import { startTyping, stopTyping, tickTyping } from "./typing-manager.js";
+
+// ============================================================================
+// Channel ID Lookup via SQL
+// ============================================================================
+
+/** Minimal interface for ctx.session (added by WOP-1538). */
+interface CtxWithSession {
+  session?: {
+    readConversationLog?: (sessionName: string) => Promise<Array<{ channel?: { id: string; type: string } }>>;
+  };
+}
+
+/**
+ * Find the Discord channel ID from a session's conversation log via SQL.
+ * Scans entries newest-first for one with channel.type === "discord".
+ */
+export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionName: string): Promise<string | null> {
+  const ctxWithSession = ctx as unknown as CtxWithSession;
+  if (!ctxWithSession.session?.readConversationLog) {
+    logger.warn({ msg: "ctx.session.readConversationLog not available (WOP-1538 required)", sessionName });
+    return null;
+  }
+
+  try {
+    const entries = await ctxWithSession.session.readConversationLog(sessionName);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.channel?.type === "discord" && entry.channel?.id) {
+        logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
+        return entry.channel.id;
+      }
+    }
+    logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
+    return null;
+  } catch (err) {
+    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
+    return null;
+  }
+}
 
 // ============================================================================
 // Core Inject Execution
@@ -309,7 +348,7 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
       from: payload.from,
     });
 
-    const channelId = findChannelIdFromConversationLog(payload.session);
+    const channelId = await findChannelIdFromSession(ctx, payload.session);
     if (!channelId) {
       logger.warn({
         msg: "Could not find Discord channel ID for inject",
@@ -405,7 +444,7 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
         session: payload.session,
         from: payload.from,
       });
-      const channelId = findChannelIdFromConversationLog(payload.session);
+      const channelId = await findChannelIdFromSession(ctx, payload.session);
       if (channelId) {
         try {
           await discordChannelProvider.send(channelId, payload.response);

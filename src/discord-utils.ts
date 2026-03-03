@@ -3,10 +3,7 @@
  * resolution, and channel ID lookup.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 import { type ChatInputCommandInteraction, DMChannel, type Message, TextChannel, ThreadChannel } from "discord.js";
-import { logger } from "./logger.js";
 
 /**
  * Sanitize a name for use in session keys (lowercase, replace spaces with -).
@@ -81,44 +78,4 @@ export function resolveMentions(message: Message): string {
   }
 
   return content;
-}
-
-/**
- * Find the Discord channel ID from a session's conversation log.
- * Looks for the most recent message with a Discord channel reference.
- */
-export function findChannelIdFromConversationLog(sessionName: string): string | null {
-  const sessionsDir = process.env.WOPR_HOME ? path.join(process.env.WOPR_HOME, "sessions") : "/data/sessions";
-  const logPath = path.join(sessionsDir, `${sessionName}.conversation.jsonl`);
-
-  if (!existsSync(logPath)) {
-    logger.debug({ msg: "Conversation log not found", sessionName, logPath });
-    return null;
-  }
-
-  try {
-    const content = readFileSync(logPath, "utf-8");
-    const lines = content
-      .trim()
-      .split("\n")
-      .filter((l) => l);
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.channel?.type === "discord" && entry.channel?.id) {
-          logger.debug({ msg: "Found Discord channel ID", sessionName, channelId: entry.channel.id });
-          return entry.channel.id;
-        }
-      } catch {
-        // Skip malformed lines
-      }
-    }
-
-    logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
-    return null;
-  } catch (err) {
-    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
-    return null;
-  }
 }
