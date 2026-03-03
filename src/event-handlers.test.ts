@@ -79,6 +79,7 @@ import {
   subscribeSessionEvents,
   subscribeStreamEvents,
 } from "./event-handlers.js";
+import { logger } from "./logger.js";
 import { hasOwner } from "./pairing.js";
 import { setMessageReaction } from "./reaction-manager.js";
 import { startTyping, stopTyping } from "./typing-manager.js";
@@ -429,6 +430,10 @@ describe("subscribeSessionCreateEvent", () => {
 });
 
 describe("findChannelIdFromSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("should return channel ID from most recent discord entry", async () => {
     const ctx = createMockContext();
     (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([
@@ -460,12 +465,14 @@ describe("findChannelIdFromSession", () => {
     (ctx as any).session = undefined;
     const result = await findChannelIdFromSession(ctx, "discord:test:#general");
     expect(result).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "discord:test:#general" }));
   });
 
-  it("should return null on readConversationLog error", async () => {
+  it("should return null and log error when readConversationLog throws", async () => {
     const ctx = createMockContext();
     (ctx as any).session.readConversationLog = vi.fn().mockRejectedValue(new Error("DB error"));
     const result = await findChannelIdFromSession(ctx, "discord:test:#general");
     expect(result).toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "discord:test:#general" }));
   });
 });

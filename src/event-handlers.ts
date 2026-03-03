@@ -56,6 +56,10 @@ export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionNa
 
   try {
     const entries = await ctxWithSession.session.readConversationLog(sessionName);
+    if (!Array.isArray(entries)) {
+      logger.debug({ msg: "No conversation entries for session", sessionName });
+      return null;
+    }
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.channel?.type === "discord" && entry.channel?.id) {
@@ -66,7 +70,7 @@ export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionNa
     logger.debug({ msg: "No Discord channel found in conversation log", sessionName });
     return null;
   } catch (err) {
-    logger.error({ msg: "Error reading conversation log", sessionName, error: String(err) });
+    logger.error({ msg: "Error reading conversation log", sessionName, error: err });
     return null;
   }
 }
