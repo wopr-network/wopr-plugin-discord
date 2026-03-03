@@ -1,4 +1,4 @@
 [config]
 auto_review = true
-auto_improve = true
+auto_improve = false
 auto_describe = true
