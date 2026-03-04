@@ -34,6 +34,14 @@ export interface AttachmentLimits {
   allowedContentTypes: readonly string[];
 }
 
+export class AttachmentContentTypeError extends Error {
+  readonly code = "ATTACHMENT_CONTENT_TYPE_REJECTED";
+  constructor(contentType: string | null) {
+    super(`Attachment content type not allowed: ${contentType ?? "unknown"}`);
+    this.name = "AttachmentContentTypeError";
+  }
+}
+
 export class AttachmentSizeLimitError extends Error {
   readonly code = "ATTACHMENT_SIZE_LIMIT_EXCEEDED";
   constructor(bytesReceived: number, maxSize: number) {
@@ -47,9 +55,13 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
 
   const rawMaxSize = limits?.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
   const rawMaxCount = limits?.maxPerMessage ?? DEFAULT_MAX_PER_MESSAGE;
-  const rawAllowedTypes = limits?.allowedContentTypes ?? DEFAULT_ALLOWED_CONTENT_TYPES;
-  // Treat empty allowlist as "use defaults" to prevent fail-open
-  const allowedTypes = rawAllowedTypes.length > 0 ? rawAllowedTypes : DEFAULT_ALLOWED_CONTENT_TYPES;
+  // Treat empty array the same as "not configured" — fall back to the default allowlist so a
+  // misconfigured/empty allowedContentTypes can never silently disable the content-type check.
+  const configuredAllowedTypes = limits?.allowedContentTypes;
+  const allowedTypes =
+    Array.isArray(configuredAllowedTypes) && configuredAllowedTypes.length > 0
+      ? configuredAllowedTypes
+      : DEFAULT_ALLOWED_CONTENT_TYPES;
   // Sanitize: fall back to defaults for invalid (NaN / Infinity / negative) values
   const maxSize = Number.isFinite(rawMaxSize) && rawMaxSize > 0 ? rawMaxSize : DEFAULT_MAX_SIZE_BYTES;
   const maxCount = Number.isFinite(rawMaxCount) && rawMaxCount >= 0 ? Math.floor(rawMaxCount) : DEFAULT_MAX_PER_MESSAGE;
@@ -75,41 +87,46 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
     // preventing bypass by padding requests with invalid attachments.
     count++;
 
-    // Content-type allowlist check
-    if (!allowedTypes.includes(attachment.contentType ?? "")) {
-      logger.warn({
-        msg: "Attachment content type not allowed",
-        name: attachment.name,
-        contentType: attachment.contentType,
-        allowedTypes,
-      });
-      continue;
-    }
-
-    // Pre-download size check using Discord-reported size
-    if (attachment.size > maxSize) {
-      logger.warn({
-        msg: "Attachment exceeds size limit",
-        name: attachment.name,
-        size: attachment.size,
-        limit: maxSize,
-      });
-      continue;
-    }
-
-    const timestamp = Date.now();
-    const safeName = attachment.name?.replace(/[^a-zA-Z0-9._-]/g, "_") || "attachment";
-    const filename = `${timestamp}-${message.author.id}-${attachment.id}-${safeName}`;
-    const filepath = path.join(ATTACHMENTS_DIR, filename);
-
     try {
+      // Content-type allowlist check — normalize to base type (strip params) and lowercase
+      // so that e.g. "text/plain; charset=utf-8" correctly matches "text/plain".
+      const baseContentType = (attachment.contentType ?? "").split(";")[0].trim().toLowerCase();
+      if (!allowedTypes.includes(baseContentType)) {
+        throw new AttachmentContentTypeError(attachment.contentType);
+      }
+
+      // Pre-download size check using Discord-reported size
+      if (attachment.size > maxSize) {
+        logger.warn({
+          msg: "Attachment exceeds size limit",
+          name: attachment.name,
+          size: attachment.size,
+          limit: maxSize,
+        });
+        continue;
+      }
+
+      const timestamp = Date.now();
+      const safeName = attachment.name?.replace(/[^a-zA-Z0-9._-]/g, "_") || "attachment";
+      const filename = `${timestamp}-${message.author.id}-${attachment.id}-${safeName}`;
+      const filepath = path.join(ATTACHMENTS_DIR, filename);
+
       const saved = await downloadAttachment(attachment.url, filepath, maxSize);
       if (saved) {
         savedPaths.push(filepath);
         logger.info({ msg: "Attachment saved", filename, size: attachment.size, contentType: attachment.contentType });
       }
     } catch (err) {
-      logger.error({ msg: "Error saving attachment", name: attachment.name, error: String(err) });
+      if (err instanceof AttachmentContentTypeError) {
+        logger.warn({
+          msg: "Attachment content type not allowed",
+          name: attachment.name,
+          contentType: attachment.contentType,
+          allowedTypes,
+        });
+      } else {
+        logger.error({ msg: "Error saving attachment", name: attachment.name, error: String(err) });
+      }
     }
   }
 

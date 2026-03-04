@@ -54,7 +54,7 @@ vi.mock("./logger.js", () => ({
   },
 }));
 
-import { DEFAULT_ALLOWED_CONTENT_TYPES, saveAttachments } from "./attachments.js";
+import { AttachmentContentTypeError, DEFAULT_ALLOWED_CONTENT_TYPES, saveAttachments } from "./attachments.js";
 import { logger } from "./logger.js";
 
 function makeMessage(attachments: Array<{ name: string; url: string; size: number; contentType: string }>) {
@@ -291,6 +291,79 @@ describe("saveAttachments", () => {
     expect(DEFAULT_ALLOWED_CONTENT_TYPES).toContain("text/plain");
     expect(DEFAULT_ALLOWED_CONTENT_TYPES).toContain("text/markdown");
     expect(DEFAULT_ALLOWED_CONTENT_TYPES).toContain("application/pdf");
+  });
+
+  it("falls back to DEFAULT_ALLOWED_CONTENT_TYPES when allowedContentTypes is empty array", async () => {
+    // Empty array must NOT disable the allowlist — it must fall back to defaults.
+    const msg = makeMessage([
+      {
+        name: "malware.exe",
+        url: "https://cdn.discord.com/malware.exe",
+        size: 100,
+        contentType: "application/x-msdownload",
+      },
+    ]);
+
+    const result = await saveAttachments(msg, { allowedContentTypes: [] });
+    expect(result).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ msg: "Attachment content type not allowed" }));
+  });
+
+  it("allows content type with parameters (e.g. text/plain; charset=utf-8)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("hello");
+      })(),
+    });
+
+    const msg = makeMessage([
+      {
+        name: "readme.txt",
+        url: "https://cdn.discord.com/readme.txt",
+        size: 100,
+        contentType: "text/plain; charset=utf-8",
+      },
+    ]);
+
+    const result = await saveAttachments(msg);
+    expect(result.length).toBe(1);
+  });
+
+  it("allows content type with uppercase chars (case-insensitive match)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("data");
+      })(),
+    });
+
+    const msg = makeMessage([
+      { name: "photo.jpg", url: "https://cdn.discord.com/photo.jpg", size: 100, contentType: "Image/JPEG" },
+    ]);
+
+    const result = await saveAttachments(msg);
+    expect(result.length).toBe(1);
+  });
+
+  it("AttachmentContentTypeError is thrown for rejected content types (instanceof check)", async () => {
+    // The error class must be thrown so callers/metrics can detect it via instanceof.
+    // saveAttachments catches it internally, so we verify it was wired by checking the warn log.
+    const msg = makeMessage([
+      {
+        name: "virus.exe",
+        url: "https://cdn.discord.com/virus.exe",
+        size: 100,
+        contentType: "application/x-msdownload",
+      },
+    ]);
+
+    await saveAttachments(msg);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ msg: "Attachment content type not allowed" }));
+    // Confirm the class itself is importable and has the expected shape
+    const err = new AttachmentContentTypeError("application/x-msdownload");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe("ATTACHMENT_CONTENT_TYPE_REJECTED");
   });
 
   it("aborts body stream when timeout fires during download", async () => {
