@@ -14,6 +14,7 @@
  * - Channels are independent (no cross-channel interference)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChannelQueueManager, type QueuedInject } from "../src/channel-queue.js";
 import { createMockClient, createMockMessage, createMockTextChannel, createMockUser } from "./mocks/discord-client.js";
 import { createMockContext } from "./mocks/wopr-context.js";
 
@@ -868,6 +869,49 @@ describe("Channel Queue System", () => {
       expect(callCount).toBe(2);
 
       await shutdown();
+    });
+
+    it("should process subsequent items after a pre-rejected processingChain", async () => {
+      // Directly exercises the outer .catch() on processingChain (WOP-1560 targeted).
+      // A pre-rejected chain simulates state that escapes the inner try/catch.
+      // Without .catch(): all .then() handlers are skipped → callCount stays 0.
+      // With .catch(): rejection is absorbed after item1, so item2 executes → callCount === 1.
+
+      let injectCallCount = 0;
+      const manager = new ChannelQueueManager(async () => {
+        injectCallCount++;
+      });
+      const channelId = "ch-pre-rejected";
+
+      // Suppress unhandled-rejection warning; this rejection is intentional
+      const preRejected = Promise.reject(new Error("Simulated pre-existing chain failure"));
+      preRejected.catch(() => {});
+
+      (manager as any).channelQueues.set(channelId, {
+        buffer: [],
+        processingChain: preRejected,
+        pendingItems: [],
+        humanTypingUntil: 0,
+        currentInject: null,
+      });
+
+      const item: QueuedInject = {
+        sessionKey: "test-session",
+        messageContent: "post-failure item",
+        authorDisplayName: "TestUser",
+        replyToMessage: {} as any,
+        isBot: false,
+        queuedAt: Date.now(),
+      };
+
+      // item1: chained onto the pre-rejected promise → .then() skipped, .catch() absorbs it
+      manager.queueInject(channelId, item);
+      // item2: chained onto the resolved promise from .catch() → .then() runs
+      manager.queueInject(channelId, item);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(injectCallCount).toBe(1);
     });
   });
 });
