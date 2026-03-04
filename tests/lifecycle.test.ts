@@ -2,12 +2,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createMockContext } from "./mocks/wopr-context.js";
 import { createMockClient } from "./mocks/discord-client.js";
 
+// Mutable so beforeEach can replace it — prevents event-handler accumulation
+// across tests on the same singleton object.
 let mockClient = createMockClient();
 
 vi.mock("discord.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("discord.js")>();
   return {
     ...actual,
+    // mockClient is reassigned in beforeEach; the implementation closure
+    // references the variable, so each test gets the latest instance.
     Client: vi.fn(() => mockClient),
   };
 });
@@ -81,14 +85,18 @@ import { subscribeSessionEvents, subscribeStreamEvents } from "../src/event-hand
 
 describe("plugin lifecycle", () => {
   beforeEach(async () => {
+    // Fresh client each test — avoids accumulated event handlers and stale
+    // mock state from previous calls to plugin.init().
     mockClient = createMockClient();
     const { Client } = await import("discord.js");
     vi.mocked(Client as any).mockImplementation(function () { return mockClient; });
+    vi.mocked(subscribeSessionEvents).mockReturnValue(vi.fn());
+    vi.mocked(subscribeStreamEvents).mockReturnValue(vi.fn());
   });
 
   afterEach(async () => {
     await plugin.shutdown();
-    vi.resetAllMocks();
+    vi.clearAllMocks();
   });
 
   it("exports init and shutdown functions", () => {
@@ -168,6 +176,11 @@ describe("plugin lifecycle", () => {
     expect(ctx.unregisterExtension).toHaveBeenCalledWith("discord");
   });
 
+  // plugin.init() is not idempotent — it does not guard against being called
+  // while already initialized. Each call creates a new Client and logs in again.
+  // This documents the current contract (not a bug fix); if idempotency is
+  // desired in the future, production code in src/index.ts should be updated
+  // and this test adjusted to assert login is called only once.
   it("double init() calls login twice", async () => {
     const ctx = createMockContext({
       getConfig: vi.fn().mockReturnValue({ token: "test-token" }),
