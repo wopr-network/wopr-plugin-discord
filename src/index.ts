@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
+import { DEFAULT_MAX_PER_MESSAGE, DEFAULT_MAX_SIZE_BYTES } from "./attachments.js";
 import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
 import {
@@ -124,6 +125,20 @@ const configSchema: ConfigSchema = {
       label: "Use Components v2",
       default: false,
       description: "Enable Discord Components v2 message layout (Containers, Sections). Cannot mix with legacy embeds.",
+    },
+    {
+      name: "maxAttachmentSizeBytes",
+      type: "number",
+      label: "Max Attachment Size (bytes)",
+      default: DEFAULT_MAX_SIZE_BYTES,
+      description: "Maximum size in bytes for a single Discord attachment download (default 10MB)",
+    },
+    {
+      name: "maxAttachmentsPerMessage",
+      type: "number",
+      label: "Max Attachments Per Message",
+      default: DEFAULT_MAX_PER_MESSAGE,
+      description: "Maximum number of attachments to download per message (default 5)",
     },
     // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
     { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },

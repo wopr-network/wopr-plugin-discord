@@ -294,7 +294,14 @@ export async function handleMessage(
     }
 
     if (message.attachments.size > 0) {
-      const attachmentPaths = await saveAttachments(message);
+      const attachmentConfig = ctx.getConfig<{
+        maxAttachmentSizeBytes?: number;
+        maxAttachmentsPerMessage?: number;
+      }>();
+      const attachmentPaths = await saveAttachments(message, {
+        maxSizeBytes: attachmentConfig.maxAttachmentSizeBytes,
+        maxPerMessage: attachmentConfig.maxAttachmentsPerMessage,
+      });
       if (attachmentPaths.length > 0) {
         const attachmentInfo = attachmentPaths.map((p) => `[Attachment: ${p}]`).join("\n");
         messageContent = messageContent ? `${messageContent}\n\n${attachmentInfo}` : attachmentInfo;

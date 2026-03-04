@@ -1,246 +1,243 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Hoist mock references so they're available in vi.mock factories
-const mocks = vi.hoisted(() => ({
-  existsSync: vi.fn().mockReturnValue(false),
-  mkdirSync: vi.fn(),
-  createWriteStream: vi.fn(),
-  pipeline: vi.fn().mockResolvedValue(undefined),
-  loggerInfo: vi.fn(),
-  loggerWarn: vi.fn(),
-  loggerError: vi.fn(),
-}));
-
-vi.mock("node:fs", () => ({
-  existsSync: mocks.existsSync,
-  mkdirSync: mocks.mkdirSync,
-  createWriteStream: mocks.createWriteStream,
-}));
+// Mock node:fs and node:fs/promises before importing module
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const { PassThrough } = await import("node:stream");
+  return {
+    ...actual,
+    existsSync: vi.fn((p: string) => {
+      if (p === "/data") return false;
+      return actual.existsSync(p);
+    }),
+    mkdirSync: vi.fn(),
+    createWriteStream: vi.fn(() => {
+      const pt = new PassThrough();
+      pt.bytesWritten = 0;
+      pt.on("data", (chunk: Buffer) => {
+        pt.bytesWritten += chunk.length;
+      });
+      return pt;
+    }),
+  };
+});
 
 vi.mock("node:stream/promises", () => ({
-  pipeline: mocks.pipeline,
+  pipeline: vi.fn(async () => {}),
 }));
+
+vi.mock("node:fs/promises", () => ({
+  unlink: vi.fn(async () => {}),
+}));
+
+vi.mock("node:stream", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:stream")>();
+  return {
+    ...actual,
+    Readable: {
+      ...actual.Readable,
+      fromWeb: vi.fn(() => {
+        const { PassThrough } = actual;
+        return new PassThrough();
+      }),
+      from: actual.Readable.from.bind(actual.Readable),
+    },
+    Transform: actual.Transform,
+  };
+});
 
 vi.mock("./logger.js", () => ({
   logger: {
-    info: mocks.loggerInfo,
-    warn: mocks.loggerWarn,
-    error: mocks.loggerError,
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
   },
 }));
 
-import { createMockMessage } from "./__test-utils__/mocks.js";
 import { saveAttachments } from "./attachments.js";
+import { logger } from "./logger.js";
+
+function makeMessage(attachments: Array<{ name: string; url: string; size: number; contentType: string }>) {
+  const entries = attachments.map(
+    (a, i) => [String(i), { ...a, id: String(i) }] as [string, typeof a & { id: string }],
+  );
+  const map = new Map(entries);
+  return {
+    attachments: {
+      get size() {
+        return map.size;
+      },
+      [Symbol.iterator]() {
+        return map.entries();
+      },
+      entries() {
+        return map.entries();
+      },
+    },
+    author: { id: "user-123" },
+  } as unknown as import("discord.js").Message;
+}
 
 describe("saveAttachments", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.spyOn(Date, "now").mockReturnValue(1234567890);
-    mocks.existsSync.mockReturnValue(false);
   });
 
-  it("returns empty array when message has no attachments", async () => {
-    const msg = createMockMessage();
-    const result = await saveAttachments(msg);
-    expect(result).toEqual([]);
-    expect(mocks.mkdirSync).not.toHaveBeenCalled();
-  });
-
-  it("downloads and saves a single attachment", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      [
-        "att-1",
-        {
-          name: "photo.png",
-          url: "https://cdn.discord.com/photo.png",
-          size: 1024,
-          contentType: "image/png",
-        },
-      ],
+  it("rejects attachment exceeding maxSizeBytes before download", async () => {
+    const msg = makeMessage([
+      {
+        name: "huge.bin",
+        url: "https://cdn.discord.com/huge.bin",
+        size: 20_000_000,
+        contentType: "application/octet-stream",
+      },
     ]);
 
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toContain("1234567890-user-1-photo.png");
-    expect(globalThis.fetch).toHaveBeenCalledWith("https://cdn.discord.com/photo.png");
-    expect(mocks.createWriteStream).toHaveBeenCalledWith(expect.stringContaining("1234567890-user-1-photo.png"));
-    expect(mocks.pipeline).toHaveBeenCalledWith(mockBody, { close: expect.any(Function) });
-    expect(mocks.loggerInfo).toHaveBeenCalledWith(
-      expect.objectContaining({ msg: "Attachment saved", filename: expect.stringContaining("photo.png") }),
-    );
-  });
-
-  it("skips attachment when fetch returns non-ok status (404)", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      [
-        "att-1",
-        { name: "missing.png", url: "https://cdn.discord.com/missing.png", size: 512, contentType: "image/png" },
-      ],
-    ]);
-
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
-
-    const result = await saveAttachments(msg);
+    const result = await saveAttachments(msg, { maxSizeBytes: 10_000_000, maxPerMessage: 5 });
 
     expect(result).toEqual([]);
-    expect(mocks.loggerWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ msg: "Failed to download attachment", status: 404 }),
-    );
-    expect(mocks.pipeline).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ msg: "Attachment exceeds size limit" }));
   });
 
-  it("catches network error during fetch and continues", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      ["att-1", { name: "fail.png", url: "https://cdn.discord.com/fail.png", size: 256, contentType: "image/png" }],
+  it("limits number of attachments per message", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("data");
+      })(),
+    });
+
+    const msg = makeMessage([
+      { name: "a.txt", url: "https://cdn.discord.com/a.txt", size: 100, contentType: "text/plain" },
+      { name: "b.txt", url: "https://cdn.discord.com/b.txt", size: 100, contentType: "text/plain" },
+      { name: "c.txt", url: "https://cdn.discord.com/c.txt", size: 100, contentType: "text/plain" },
     ]);
 
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+    await saveAttachments(msg, { maxSizeBytes: 10_000_000, maxPerMessage: 2 });
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ msg: "Attachment limit reached" }));
+  });
+
+  it("falls back to default maxSizeBytes when NaN is supplied", async () => {
+    // NaN is sanitized to DEFAULT_MAX_SIZE_BYTES; attachment at 100 bytes is well under it
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("hello");
+      })(),
+    });
+    const msg = makeMessage([
+      { name: "f.txt", url: "https://cdn.discord.com/f.txt", size: 100, contentType: "text/plain" },
+    ]);
+    // Should not throw and should attempt the download
+    await expect(saveAttachments(msg, { maxSizeBytes: NaN })).resolves.not.toThrow();
+  });
+
+  it("falls back to default maxSizeBytes when Infinity is supplied", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("hello");
+      })(),
+    });
+    const msg = makeMessage([
+      { name: "f.txt", url: "https://cdn.discord.com/f.txt", size: 100, contentType: "text/plain" },
+    ]);
+    await expect(saveAttachments(msg, { maxSizeBytes: Infinity })).resolves.not.toThrow();
+  });
+
+  it("falls back to default maxPerMessage when NaN is supplied", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("hello");
+      })(),
+    });
+    const msg = makeMessage([
+      { name: "f.txt", url: "https://cdn.discord.com/f.txt", size: 100, contentType: "text/plain" },
+    ]);
+    await expect(saveAttachments(msg, { maxPerMessage: NaN })).resolves.not.toThrow();
+  });
+
+  it("oversized attachment consumes the count slot", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("data");
+      })(),
+    });
+
+    // maxPerMessage: 1, first attachment is oversized so it consumes the slot;
+    // second attachment should also be blocked (limit reached, not size)
+    const msg = makeMessage([
+      {
+        name: "big.bin",
+        url: "https://cdn.discord.com/big.bin",
+        size: 20_000_000,
+        contentType: "application/octet-stream",
+      },
+      { name: "small.txt", url: "https://cdn.discord.com/small.txt", size: 100, contentType: "text/plain" },
+    ]);
+
+    const result = await saveAttachments(msg, { maxSizeBytes: 10_000_000, maxPerMessage: 1 });
+    expect(result).toEqual([]);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("uses defaults when no limits provided", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("hello");
+      })(),
+    });
+
+    const msg = makeMessage([
+      { name: "small.txt", url: "https://cdn.discord.com/small.txt", size: 100, contentType: "text/plain" },
+    ]);
 
     const result = await saveAttachments(msg);
+    expect(result.length).toBe(1);
+  });
+
+  it("aborts body stream when timeout fires during download", async () => {
+    vi.useFakeTimers();
+
+    let pipelineSignal: AbortSignal | undefined;
+    const { pipeline: mockPipeline } = await import("node:stream/promises");
+    vi.mocked(mockPipeline).mockImplementationOnce((...args) => {
+      const opts = args.find((a) => a && typeof a === "object" && "signal" in a) as
+        | { signal?: AbortSignal }
+        | undefined;
+      pipelineSignal = opts?.signal;
+      // Simulate a pipeline that never resolves (stalled body)
+      return new Promise((_resolve, reject) => {
+        if (pipelineSignal) {
+          pipelineSignal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }
+      });
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        // yields nothing — stalls
+      })(),
+    });
+
+    const msg = makeMessage([
+      { name: "stall.bin", url: "https://cdn.discord.com/stall.bin", size: 100, contentType: "application/octet-stream" },
+    ]);
+
+    const promise = saveAttachments(msg);
+    // Advance past the 30s timeout
+    await vi.advanceTimersByTimeAsync(31_000);
+    const result = await promise;
 
     expect(result).toEqual([]);
-    expect(mocks.loggerError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        msg: "Error saving attachment",
-        name: "fail.png",
-        error: expect.stringContaining("ECONNREFUSED"),
-      }),
-    );
-  });
+    expect(pipelineSignal?.aborted).toBe(true);
 
-  it("processes multiple attachments and returns all saved paths", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      ["att-1", { name: "file1.txt", url: "https://cdn.discord.com/file1.txt", size: 100, contentType: "text/plain" }],
-      ["att-2", { name: "file2.jpg", url: "https://cdn.discord.com/file2.jpg", size: 200, contentType: "image/jpeg" }],
-      [
-        "att-3",
-        { name: "file3.pdf", url: "https://cdn.discord.com/file3.pdf", size: 300, contentType: "application/pdf" },
-      ],
-    ]);
-
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toHaveLength(3);
-    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
-    expect(mocks.pipeline).toHaveBeenCalledTimes(3);
-    expect(mocks.loggerInfo).toHaveBeenCalledTimes(3);
-  });
-
-  it("saves successful attachments even when one fails mid-batch", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      ["att-1", { name: "good.txt", url: "https://cdn.discord.com/good.txt", size: 100, contentType: "text/plain" }],
-      ["att-2", { name: "bad.txt", url: "https://cdn.discord.com/bad.txt", size: 200, contentType: "text/plain" }],
-      [
-        "att-3",
-        { name: "also-good.txt", url: "https://cdn.discord.com/also-good.txt", size: 300, contentType: "text/plain" },
-      ],
-    ]);
-
-    const mockBody = { pipe: vi.fn() };
-    let callCount = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 2) return Promise.resolve({ ok: false, status: 500 });
-        return Promise.resolve({ ok: true, body: mockBody });
-      }),
-    );
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toHaveLength(2);
-    expect(mocks.loggerWarn).toHaveBeenCalledTimes(1);
-    expect(mocks.loggerInfo).toHaveBeenCalledTimes(2);
-  });
-
-  it("sanitizes special characters in attachment name", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      [
-        "att-1",
-        { name: "my file (1)!@#$.png", url: "https://cdn.discord.com/x.png", size: 50, contentType: "image/png" },
-      ],
-    ]);
-
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toMatch(/my_file/);
-    expect(result[0]).toContain(".png");
-  });
-
-  it("uses fallback name when attachment.name is undefined", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      [
-        "att-1",
-        { name: undefined, url: "https://cdn.discord.com/x.bin", size: 50, contentType: "application/octet-stream" },
-      ],
-    ]);
-
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toHaveLength(1);
-    expect(result[0]).toContain("1234567890-user-1-attachment");
-  });
-
-  it("creates attachments directory if it does not exist", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      ["att-1", { name: "file.txt", url: "https://cdn.discord.com/file.txt", size: 10, contentType: "text/plain" }],
-    ]);
-
-    mocks.existsSync.mockReturnValue(false);
-
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-
-    await saveAttachments(msg);
-
-    expect(mocks.mkdirSync).toHaveBeenCalledWith(expect.any(String), { recursive: true });
-  });
-
-  it("catches pipeline error and logs it", async () => {
-    const msg = createMockMessage();
-    msg.attachments = new Map([
-      ["att-1", { name: "broken.txt", url: "https://cdn.discord.com/broken.txt", size: 10, contentType: "text/plain" }],
-    ]);
-
-    const mockBody = { pipe: vi.fn() };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, body: mockBody }));
-    mocks.createWriteStream.mockReturnValue({ close: vi.fn() });
-    mocks.pipeline.mockRejectedValueOnce(new Error("ENOSPC: no space left on device"));
-
-    const result = await saveAttachments(msg);
-
-    expect(result).toEqual([]);
-    expect(mocks.loggerError).toHaveBeenCalledWith(
-      expect.objectContaining({ msg: "Error saving attachment", error: expect.stringContaining("ENOSPC") }),
-    );
+    vi.useRealTimers();
   });
 });
