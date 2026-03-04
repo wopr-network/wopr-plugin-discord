@@ -475,4 +475,40 @@ describe("findChannelIdFromSession", () => {
     expect(result).toBeNull();
     expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "discord:test:#general" }));
   });
+
+  it("should return null for session name containing path traversal (../)", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi
+      .fn()
+      .mockResolvedValue([{ channel: { id: "ch-1", type: "discord" } }]);
+    const result = await findChannelIdFromSession(ctx, "../../etc/passwd");
+    expect(result).toBeNull();
+    expect((ctx as any).session.readConversationLog).not.toHaveBeenCalled();
+  });
+
+  it("should return null for session name containing backslash", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([]);
+    const result = await findChannelIdFromSession(ctx, "test\\..\\secret");
+    expect(result).toBeNull();
+    expect((ctx as any).session.readConversationLog).not.toHaveBeenCalled();
+  });
+
+  it("should return null for session name containing null byte", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([]);
+    const result = await findChannelIdFromSession(ctx, "test\x00evil");
+    expect(result).toBeNull();
+    expect((ctx as any).session.readConversationLog).not.toHaveBeenCalled();
+  });
+
+  it("should allow valid session keys with colons and hashes", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi
+      .fn()
+      .mockResolvedValue([{ channel: { id: "ch-valid", type: "discord" } }]);
+    const result = await findChannelIdFromSession(ctx, "discord:my-guild:#general");
+    expect(result).toBe("ch-valid");
+    expect((ctx as any).session.readConversationLog).toHaveBeenCalledWith("discord:my-guild:#general");
+  });
 });

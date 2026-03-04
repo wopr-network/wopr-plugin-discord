@@ -48,6 +48,16 @@ interface CtxWithSession {
  * Scans entries newest-first for one with channel.type === "discord".
  */
 export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionName: string): Promise<string | null> {
+  // Defense-in-depth: reject session names with path traversal characters
+  if (
+    sessionName.includes("..") ||
+    sessionName.includes("/") ||
+    sessionName.includes("\\") ||
+    sessionName.includes("\u0000")
+  ) {
+    logger.warn({ msg: "Rejected session name with path traversal characters", sessionName });
+    return null;
+  }
   const ctxWithSession = ctx as unknown as CtxWithSession;
   if (!ctxWithSession.session?.readConversationLog) {
     logger.warn({ msg: "ctx.session.readConversationLog not available (WOP-1538 required)", sessionName });
