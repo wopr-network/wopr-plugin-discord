@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@wopr-network/plugin-types':
-        specifier: ^0.7.1
-        version: 0.7.1(zod@4.3.6)
       discord.js:
         specifier: ^14.14.1
         version: 14.25.1
@@ -33,6 +30,9 @@ importers:
       '@vitest/ui':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18)
+      '@wopr-network/plugin-types':
+        specifier: ^0.7.1
+        version: 0.7.1(zod@4.3.6)
       '@wopr-network/semantic-release-config':
         specifier: ^1.0.0
         version: 1.0.0(semantic-release@24.2.9(typescript@5.9.3))
