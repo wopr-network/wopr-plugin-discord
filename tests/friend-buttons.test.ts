@@ -207,11 +207,15 @@ function createMockButtonInteraction(overrides: Record<string, any> = {}) {
   return {
     customId: overrides.customId ?? "friend_accept:alice",
     user: { id: overrides.userId ?? "owner-123" },
+    deferred: false,
+    replied: false,
+    message: { author: { id: "bot-id" }, id: "msg-1" },
     reply: vi.fn().mockResolvedValue(undefined),
     deferUpdate: vi.fn().mockResolvedValue(undefined),
     editReply: vi.fn().mockResolvedValue(undefined),
     followUp: vi.fn().mockResolvedValue(undefined),
     client: {
+      user: { id: "bot-id" },
       channels: {
         cache: new Map([[channelId, channel]]),
       },
@@ -230,7 +234,7 @@ describe("handleFriendButtonInteraction", () => {
 
   it("replies with expired message when no pending request exists", async () => {
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn().mockResolvedValue("accepted");
     const onDeny = vi.fn();
 
@@ -248,7 +252,7 @@ describe("handleFriendButtonInteraction", () => {
   it("accepts a friend request and removes pending entry", async () => {
     storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn().mockResolvedValue("Welcome alice!");
     const onDeny = vi.fn();
 
@@ -268,7 +272,7 @@ describe("handleFriendButtonInteraction", () => {
   it("sends accept message to the original channel", async () => {
     storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn().mockResolvedValue("Welcome alice!");
     const onDeny = vi.fn();
 
@@ -281,7 +285,7 @@ describe("handleFriendButtonInteraction", () => {
   it("denies a friend request and removes pending entry", async () => {
     storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_deny:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn();
     const onDeny = vi.fn().mockResolvedValue(undefined);
 
@@ -300,7 +304,7 @@ describe("handleFriendButtonInteraction", () => {
   it("follows up with error when onAccept throws", async () => {
     storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn().mockRejectedValue(new Error("network error"));
     const onDeny = vi.fn();
 
@@ -317,7 +321,7 @@ describe("handleFriendButtonInteraction", () => {
   it("follows up with error when onDeny throws", async () => {
     storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_deny:alice" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn();
     const onDeny = vi.fn().mockRejectedValue(new Error("db error"));
 
@@ -333,7 +337,7 @@ describe("handleFriendButtonInteraction", () => {
 
   it("does nothing for non-friend button custom IDs", async () => {
     const interaction = createMockButtonInteraction({ customId: "other_button:xyz" });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn();
     const onDeny = vi.fn();
 
