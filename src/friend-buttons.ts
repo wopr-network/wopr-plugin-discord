@@ -170,6 +170,110 @@ export function parseButtonCustomId(customId: string): { action: "accept" | "den
 /**
  * Handle a friend request button interaction
  */
+/**
+ * Send an error response, using followUp if already deferred/replied, else reply
+ */
+async function replyWithError(interaction: ButtonInteraction, message: string): Promise<void> {
+  const payload = { content: message, ephemeral: true } as const;
+  if (interaction.deferred || interaction.replied) {
+    await interaction.followUp(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+}
+
+/**
+ * Verify button originated from this bot's own DM
+ */
+function verifyBotOrigin(interaction: ButtonInteraction): boolean {
+  const botId = interaction.client.user?.id;
+  return !!(botId && interaction.message?.author?.id === botId);
+}
+
+/**
+ * Verify clicking user is the bot owner
+ */
+function verifyOwnerUser(interaction: ButtonInteraction, ctx: WOPRPluginContext): boolean {
+  const ownerId = getOwnerUserId(ctx);
+  return !!(ownerId && interaction.user.id === ownerId);
+}
+
+/**
+ * Verify button's message ID matches stored pending request
+ */
+function verifyMessageId(pending: PendingButtonRequest, interaction: ButtonInteraction): boolean {
+  if (pending.messageId === undefined) return true;
+  return pending.messageId === interaction.message?.id;
+}
+
+/**
+ * Handle accept action
+ */
+async function handleAccept(
+  parsed: ReturnType<typeof parseButtonCustomId>,
+  pending: PendingButtonRequest,
+  interaction: ButtonInteraction,
+  ctx: WOPRPluginContext,
+  onAccept: (from: string, pending: PendingButtonRequest) => Promise<string>,
+): Promise<void> {
+  const from = parsed?.from;
+  if (!from) return;
+
+  try {
+    const acceptMessage = await onAccept(from, pending);
+    removePendingButtonRequest(from);
+
+    await interaction.editReply({
+      content: `Friend request from @${from} **accepted**.`,
+      embeds: [],
+      components: [],
+    });
+
+    const channel = interaction.client.channels.cache.get(pending.channelId);
+    if (channel?.isTextBased() && "send" in channel) {
+      await channel.send(acceptMessage);
+    }
+
+    ctx.log.info(`[discord] Friend request from ${from} accepted via button`);
+  } catch (err) {
+    await interaction.followUp({
+      content: `Failed to accept friend request: ${err}`,
+      ephemeral: true,
+    });
+  }
+}
+
+/**
+ * Handle deny action
+ */
+async function handleDeny(
+  parsed: ReturnType<typeof parseButtonCustomId>,
+  interaction: ButtonInteraction,
+  ctx: WOPRPluginContext,
+  onDeny: (from: string) => Promise<void>,
+): Promise<void> {
+  const from = parsed?.from;
+  if (!from) return;
+
+  try {
+    await onDeny(from);
+    removePendingButtonRequest(from);
+
+    await interaction.editReply({
+      content: `Friend request from @${from} **denied**.`,
+      embeds: [],
+      components: [],
+    });
+
+    ctx.log.info(`[discord] Friend request from ${from} denied via button`);
+  } catch (err) {
+    await interaction.followUp({
+      content: `Failed to deny friend request: ${err}`,
+      ephemeral: true,
+    });
+  }
+}
+
 export async function handleFriendButtonInteraction(
   interaction: ButtonInteraction,
   ctx: WOPRPluginContext,
@@ -180,30 +284,19 @@ export async function handleFriendButtonInteraction(
   const parsed = parseButtonCustomId(interaction.customId);
   if (!parsed) return;
 
-  // Verify the button originated from this bot's own DM
-  const botId = interaction.client.user?.id;
-  if (!botId || interaction.message?.author?.id !== botId) {
-    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(payload);
-    } else {
-      await interaction.reply(payload);
-    }
+  // Verify button originated from this bot
+  if (!verifyBotOrigin(interaction)) {
+    await replyWithError(interaction, UNAUTHORIZED_MESSAGE);
     return;
   }
 
-  // Verify the clicking user is the bot owner
-  const ownerId = getOwnerUserId(ctx);
-  if (!ownerId || interaction.user.id !== ownerId) {
-    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(payload);
-    } else {
-      await interaction.reply(payload);
-    }
+  // Verify clicking user is the owner
+  if (!verifyOwnerUser(interaction, ctx)) {
+    await replyWithError(interaction, UNAUTHORIZED_MESSAGE);
     return;
   }
 
+  // Get and validate pending request
   const pending = getPendingButtonRequest(parsed.from);
   if (!pending) {
     await interaction.reply({
@@ -213,62 +306,18 @@ export async function handleFriendButtonInteraction(
     return;
   }
 
-  // Verify the button's message ID matches the stored pending request
-  if (pending.messageId !== undefined && pending.messageId !== interaction.message?.id) {
-    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
-    if (interaction.deferred || interaction.replied) {
-      await interaction.followUp(payload);
-    } else {
-      await interaction.reply(payload);
-    }
+  // Verify message ID matches
+  if (!verifyMessageId(pending, interaction)) {
+    await replyWithError(interaction, UNAUTHORIZED_MESSAGE);
     return;
   }
 
   await interaction.deferUpdate();
 
   if (parsed.action === "accept") {
-    try {
-      const acceptMessage = await onAccept(parsed.from, pending);
-
-      removePendingButtonRequest(parsed.from);
-
-      await interaction.editReply({
-        content: `Friend request from @${parsed.from} **accepted**.`,
-        embeds: [],
-        components: [],
-      });
-
-      const channel = interaction.client.channels.cache.get(pending.channelId);
-      if (channel?.isTextBased() && "send" in channel) {
-        await channel.send(acceptMessage);
-      }
-
-      ctx.log.info(`[discord] Friend request from ${parsed.from} accepted via button`);
-    } catch (err) {
-      await interaction.followUp({
-        content: `Failed to accept friend request: ${err}`,
-        ephemeral: true,
-      });
-    }
+    await handleAccept(parsed, pending, interaction, ctx, onAccept);
   } else if (parsed.action === "deny") {
-    try {
-      await onDeny(parsed.from);
-
-      removePendingButtonRequest(parsed.from);
-
-      await interaction.editReply({
-        content: `Friend request from @${parsed.from} **denied**.`,
-        embeds: [],
-        components: [],
-      });
-
-      ctx.log.info(`[discord] Friend request from ${parsed.from} denied via button`);
-    } catch (err) {
-      await interaction.followUp({
-        content: `Failed to deny friend request: ${err}`,
-        ephemeral: true,
-      });
-    }
+    await handleDeny(parsed, interaction, ctx, onDeny);
   }
 }
 
