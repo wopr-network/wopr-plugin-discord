@@ -176,25 +176,29 @@ export class ChannelQueueManager {
   private addToChain(channelId: string, item: QueuedInject): void {
     const queue = this.getChannelQueue(channelId);
 
-    queue.processingChain = queue.processingChain.then(async () => {
-      if (queue.currentInject?.cancelled) {
-        logger.info({ msg: "Inject skipped - queue was cancelled", channelId, from: item.authorDisplayName });
-        return;
-      }
-
-      const cancelToken = { cancelled: false };
-      queue.currentInject = cancelToken;
-
-      try {
-        await this.executeInject(item, cancelToken);
-      } catch (error) {
-        logger.error({ msg: "Chain inject failed", channelId, error: String(error) });
-      } finally {
-        if (queue.currentInject === cancelToken) {
-          queue.currentInject = null;
+    queue.processingChain = queue.processingChain
+      .catch((err) => {
+        logger.error({ msg: "Queue chain error", channelId, error: String(err) });
+      })
+      .then(async () => {
+        if (queue.currentInject?.cancelled) {
+          logger.info({ msg: "Inject skipped - queue was cancelled", channelId, from: item.authorDisplayName });
+          return;
         }
-      }
-    });
+
+        const cancelToken = { cancelled: false };
+        queue.currentInject = cancelToken;
+
+        try {
+          await this.executeInject(item, cancelToken);
+        } catch (error) {
+          logger.error({ msg: "Chain inject failed", channelId, error: String(error) });
+        } finally {
+          if (queue.currentInject === cancelToken) {
+            queue.currentInject = null;
+          }
+        }
+      });
   }
 
   cancelChannelQueue(channelId: string): boolean {
