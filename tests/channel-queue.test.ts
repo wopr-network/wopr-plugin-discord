@@ -837,4 +837,37 @@ describe("Channel Queue System", () => {
       await shutdown();
     });
   });
+
+  // =========================================================================
+  // Chain error resilience (WOP-1560)
+  // =========================================================================
+
+  describe("Chain error resilience (WOP-1560)", () => {
+    it("should continue processing after a chain error", async () => {
+      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay: 10 });
+
+      const channelId = "ch-resilience-1";
+
+      let callCount = 0;
+      (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, _msg: string) => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("Corrupted item simulation");
+        }
+        return "OK";
+      });
+
+      const msg1 = createHumanMessage(channelId, "Will fail");
+      const msg2 = createHumanMessage(channelId, "Should still process");
+
+      await handleMessage(msg1);
+      await handleMessage(msg2);
+
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(callCount).toBe(2);
+
+      await shutdown();
+    });
+  });
 });
