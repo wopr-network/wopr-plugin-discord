@@ -122,9 +122,13 @@ async function downloadAttachment(url: string, filepath: string, maxSize: number
     },
   });
 
-  const nodeStream = response.body
-    ? Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
-    : Readable.from([]);
+  // Guard against body already being a Node.js Readable (mocks/polyfills)
+  const nodeStream =
+    response.body instanceof Readable
+      ? response.body
+      : response.body
+        ? Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
+        : Readable.from([]);
 
   const fileStream = createWriteStream(filepath);
 
@@ -133,7 +137,8 @@ async function downloadAttachment(url: string, filepath: string, maxSize: number
     // body stream is terminated by the same 30s timeout.
     await pipeline(nodeStream, sizeGuard, fileStream, { signal: controller.signal });
   } catch (err) {
-    // Clean up partial file on failure
+    // Clean up partial file on failure — destroy stream first to avoid EBUSY on Windows
+    fileStream.destroy();
     try {
       await unlink(filepath);
     } catch {

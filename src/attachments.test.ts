@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock node:fs and node:fs/promises before importing module
 vi.mock("node:fs", async (importOriginal) => {
@@ -81,6 +81,12 @@ function makeMessage(attachments: Array<{ name: string; url: string; size: numbe
 describe("saveAttachments", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("rejects attachment exceeding maxSizeBytes before download", async () => {
@@ -242,7 +248,5 @@ describe("saveAttachments", () => {
 
     expect(result).toEqual([]);
     expect(pipelineSignal?.aborted).toBe(true);
-
-    vi.useRealTimers();
   });
 });
