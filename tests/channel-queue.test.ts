@@ -596,13 +596,11 @@ describe("Channel Queue System", () => {
       const msg2 = createHumanMessage(channelId, "Second message");
       const msg3 = createHumanMessage(channelId, "Third message");
 
-      // Send three messages to the same channel
-      await handleMessage(msg1);
-      await handleMessage(msg2);
-      await handleMessage(msg3);
+      // Send three messages to the same channel concurrently so they all enter the queue simultaneously
+      await Promise.all([handleMessage(msg1), handleMessage(msg2), handleMessage(msg3)]);
 
-      // Advance timers to let the promise chain process all three
-      await vi.advanceTimersByTimeAsync(500);
+      // Advance timers enough for all 3 messages to process sequentially (injectDelay=30 + mock delay=30, × 3 messages)
+      await vi.advanceTimersByTimeAsync(3 * 60);
 
       // Verify all three were injected in FIFO order
       expect(injectOrder.length).toBe(3);
