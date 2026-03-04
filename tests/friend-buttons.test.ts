@@ -155,6 +155,7 @@ describe("cleanupExpiredButtonRequests", () => {
 
   it("removes requests older than 15 minutes", () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const validPubkey = "a".repeat(64);
     const validEncryptPub = "b".repeat(64);
 
@@ -168,6 +169,7 @@ describe("cleanupExpiredButtonRequests", () => {
 
   it("keeps requests younger than 15 minutes", () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const validPubkey = "a".repeat(64);
     const validEncryptPub = "b".repeat(64);
 
@@ -181,6 +183,7 @@ describe("cleanupExpiredButtonRequests", () => {
 
   it("removes only expired requests, keeps fresh ones", () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const validPubkey = "a".repeat(64);
     const validEncryptPub = "b".repeat(64);
 
@@ -202,7 +205,7 @@ function createMockButtonInteraction(overrides: Record<string, any> = {}) {
   const channel = {
     id: channelId,
     isTextBased: () => true,
-    send: vi.fn().mockResolvedValue(undefined),
+    send: vi.fn().mockResolvedValue({ id: "msg-1" }),
   };
   return {
     customId: overrides.customId ?? "friend_accept:alice",
@@ -383,7 +386,14 @@ describe("createFriendRequestButtons", () => {
   it("truncates long usernames to fit custom ID limit", () => {
     const longName = "a".repeat(100);
     const row = createFriendRequestButtons(longName);
-    expect(row).toBeDefined();
+    const [acceptBtn, denyBtn] = row.components;
+    const acceptId = (acceptBtn.toJSON() as any).custom_id as string;
+    const denyId = (denyBtn.toJSON() as any).custom_id as string;
+    expect(acceptId.length).toBeLessThanOrEqual(100);
+    expect(denyId.length).toBeLessThanOrEqual(100);
+    // "friend_accept:".length = 14, so max username = 86 chars
+    expect(acceptId).toBe(`friend_accept:${"a".repeat(86)}`);
+    expect(denyId).toBe(`friend_deny:${"a".repeat(86)}`);
   });
 });
 
