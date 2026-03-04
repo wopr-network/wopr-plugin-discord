@@ -34,7 +34,8 @@ export const sessionNameSchema = z
 /** /claim code — should match the pairing code alphabet: [A-Z2-9], 8 chars */
 export const pairingCodeSchema = z
   .string()
-  .length(8, "Pairing code must be exactly 8 characters")
+  .min(1, "Pairing code cannot be empty")
+  .max(16, "Pairing code is too long")
   .regex(/^[A-Z2-9]+$/i, "Pairing code contains invalid characters");
 
 /** /model model — free-text with autocomplete */
