@@ -511,4 +511,14 @@ describe("findChannelIdFromSession", () => {
     expect(result).toBe("ch-valid");
     expect((ctx as any).session.readConversationLog).toHaveBeenCalledWith("discord:my-guild:#general");
   });
+
+  it("should allow valid thread session keys containing '/'", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi
+      .fn()
+      .mockResolvedValue([{ channel: { id: "ch-thread", type: "discord" } }]);
+    const result = await findChannelIdFromSession(ctx, "discord:my-guild:#general/my-thread");
+    expect(result).toBe("ch-thread");
+    expect((ctx as any).session.readConversationLog).toHaveBeenCalledWith("discord:my-guild:#general/my-thread");
+  });
 });
