@@ -60,7 +60,7 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promi
 // Explicit state machine - each state is mutually exclusive
 type MessageState =
   | { status: "buffering"; content: string }
-  | { status: "sending"; content: string; promise: Promise<Message> }
+  | { status: "sending"; content: string; promise: Promise<Message>; pendingWhileSending: string }
   | { status: "sent"; content: string; discordMsg: Message; lastEditLength: number }
   | { status: "finalized" };
 
@@ -114,7 +114,13 @@ export class DiscordMessageUnit {
       return;
     }
     if (this.state.status === "sending") {
-      logger.debug({ msg: "Unit.append ignored - sending", unitId: this.unitId, textLen: text.length });
+      this.state = { ...this.state, pendingWhileSending: this.state.pendingWhileSending + text };
+      logger.debug({
+        msg: "Unit.append buffered - sending",
+        unitId: this.unitId,
+        textLen: text.length,
+        bufferedLen: this.state.pendingWhileSending.length,
+      });
       return;
     }
     const prevLen = this.state.content.length;
@@ -184,11 +190,20 @@ export class DiscordMessageUnit {
       () => (this.isReply ? this.replyTo.reply(payload) : this.channel.send(payload)) as Promise<Message>,
       `sendInitial:${this.unitId}`,
     );
-    this.state = { status: "sending", content, promise };
+    this.state = { status: "sending", content, promise, pendingWhileSending: "" };
 
     try {
       const discordMsg = await promise;
-      this.state = { status: "sent", content, discordMsg, lastEditLength: content.length };
+      const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      const mergedContent = content + buffered;
+      this.state = { status: "sent", content: mergedContent, discordMsg, lastEditLength: content.length };
+      if (buffered) {
+        logger.debug({
+          msg: "Unit.sendInitial flushed buffered content",
+          unitId: this.unitId,
+          bufferedLen: buffered.length,
+        });
+      }
       logger.debug({ msg: "Unit.sendInitial success", unitId: this.unitId, msgId: discordMsg.id });
       return "ok";
     } catch (error) {
@@ -219,7 +234,7 @@ export class DiscordMessageUnit {
       splitAt = bestBreak;
     }
     const toSend = content.slice(0, splitAt);
-    const overflow = content.slice(splitAt).trimStart();
+    let overflow = content.slice(splitAt).trimStart();
     logger.debug({
       msg: "Unit.handleOverflow",
       unitId: this.unitId,
@@ -234,11 +249,15 @@ export class DiscordMessageUnit {
         () => (this.isReply ? this.replyTo.reply(sendPayload) : this.channel.send(sendPayload)) as Promise<Message>,
         `handleOverflow:send:${this.unitId}`,
       );
-      this.state = { status: "sending", content: toSend, promise };
+      this.state = { status: "sending", content: toSend, promise, pendingWhileSending: "" };
 
       try {
         await promise;
+        const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
         this.state = { status: "finalized" };
+        if (buffered) {
+          overflow = buffered + overflow;
+        }
         logger.debug({ msg: "Unit.handleOverflow sent and finalized", unitId: this.unitId });
       } catch (error) {
         this.state = { status: "buffering", content };
@@ -282,13 +301,22 @@ export class DiscordMessageUnit {
     if (this.state.status === "sending") {
       logger.debug({ msg: "Unit.finalize waiting for send", unitId: this.unitId });
       try {
+        const pendingText = this.state.pendingWhileSending;
+        const sendContent = this.state.content;
         const discordMsg = await this.state.promise;
         this.state = {
           status: "sent",
-          content: this.state.content,
+          content: sendContent + pendingText,
           discordMsg,
-          lastEditLength: this.state.content.length,
+          lastEditLength: sendContent.length,
         };
+        if (pendingText) {
+          logger.debug({
+            msg: "Unit.finalize flushed buffered content",
+            unitId: this.unitId,
+            bufferedLen: pendingText.length,
+          });
+        }
         logger.debug({ msg: "Unit.finalize send completed", unitId: this.unitId, msgId: discordMsg.id });
       } catch (error) {
         logger.error({ msg: "Unit.finalize send failed", unitId: this.unitId, error: String(error) });
