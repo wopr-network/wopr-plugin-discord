@@ -34,9 +34,6 @@ src/
   discord-utils.ts      # Shared helpers
   discord-extension.ts  # Extension hooks
   webmcp-discord.ts     # WebMCP integration
-  compat/
-    v15-shim.ts         # discord.js v15 compatibility shim
-    v15-audit.ts        # Audit for v15 API usage
   logger.ts             # Winston logger instance
   types.ts              # Plugin-local types
 ```
@@ -53,7 +50,7 @@ The default export must satisfy `WOPRPlugin`. The plugin receives `WOPRPluginCon
 
 ## Key Conventions
 
-- discord.js v14 (v15 shim exists in `compat/` for forward compatibility)
+- discord.js v14
 - Winston for logging (not console.log)
 - Node ≥ 24, ESM (`"type": "module"`)
 - Conventional commits with issue key: `feat: add voice support (WOP-123)`
