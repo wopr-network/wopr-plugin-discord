@@ -6,16 +6,39 @@
  */
 
 import { ChannelType, type Client } from "discord.js";
-import {
-  createFriendRequestButtons,
-  createFriendRequestEmbed,
-  getOwnerUserId,
-  setMessageIdOnPendingButtonRequest,
-  storePendingButtonRequest,
-} from "./friend-buttons.js";
+import { createFriendRequestButtons, createFriendRequestEmbed, getOwnerUserId } from "./friend-buttons.js";
 import { logger } from "./logger.js";
 import { claimPairingCode, hasOwner, setOwner } from "./pairing.js";
 import type { WOPRPluginContext } from "./types.js";
+
+// Callback map: Discord message ID → { onAccept, onDeny, requestFrom, timestamp }
+const CALLBACK_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+export interface PendingNotificationCallbacks {
+  onAccept: () => Promise<string>;
+  onDeny: () => Promise<void>;
+  requestFrom: string;
+  timestamp: number;
+}
+
+const pendingCallbacks: Map<string, PendingNotificationCallbacks> = new Map();
+
+export function getPendingCallbacks(messageId: string): PendingNotificationCallbacks | undefined {
+  return pendingCallbacks.get(messageId);
+}
+
+export function removePendingCallbacks(messageId: string): void {
+  pendingCallbacks.delete(messageId);
+}
+
+export function cleanupExpiredCallbacks(): void {
+  const now = Date.now();
+  for (const [key, entry] of pendingCallbacks) {
+    if (now - entry.timestamp > CALLBACK_TTL_MS) {
+      pendingCallbacks.delete(key);
+    }
+  }
+}
 
 // ============================================================================
 // Structured return types for WebMCP-facing extension methods
@@ -71,12 +94,6 @@ async function sendFriendRequestNotification(
       return false;
     }
 
-    const validationError = storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
-    if (validationError) {
-      logger.warn({ msg: "Friend request rejected: invalid keys", requestFrom, error: validationError });
-      return false;
-    }
-
     const pubkeyShort = `${pubkey.slice(0, 12)}...`;
     const embed = createFriendRequestEmbed(requestFrom, pubkeyShort, channelName);
     const buttons = createFriendRequestButtons(requestFrom);
@@ -86,7 +103,44 @@ async function sendFriendRequestNotification(
       components: [buttons],
     });
 
-    setMessageIdOnPendingButtonRequest(requestFrom, sentMessage.id);
+    const p2pExt = ctx.getExtension?.("p2p") as
+      | {
+          acceptFriendRequest?: (
+            from: string,
+            pubkey: string,
+            encryptPub: string,
+            signature: string,
+            channelId: string,
+          ) => Promise<{ friend: { name: string }; acceptMessage: string }>;
+          denyFriendRequest?: (from: string, signature: string) => Promise<void>;
+        }
+      | undefined;
+
+    // Store callbacks keyed by Discord message ID
+    pendingCallbacks.set(sentMessage.id, {
+      requestFrom,
+      timestamp: Date.now(),
+      onAccept: async () => {
+        if (p2pExt?.acceptFriendRequest) {
+          const result = await p2pExt.acceptFriendRequest(requestFrom, pubkey, encryptPub, signature, channelId);
+          try {
+            const channel = client.channels.cache.get(channelId);
+            if (channel?.isTextBased() && "send" in channel) {
+              await channel.send(result.acceptMessage);
+            }
+          } catch (e) {
+            logger.warn({ msg: "Failed to send accept message to channel", error: String(e) });
+          }
+          return result.acceptMessage;
+        }
+        return `Accepted friend request from @${requestFrom} (but P2P extension not available)`;
+      },
+      onDeny: async () => {
+        if (p2pExt?.denyFriendRequest) {
+          await p2pExt.denyFriendRequest(requestFrom, signature);
+        }
+      },
+    });
 
     logger.info({ msg: "Friend request notification sent to owner", requestFrom, ownerUserId: config.ownerUserId });
     return true;
