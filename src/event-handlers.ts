@@ -299,12 +299,14 @@ export async function handleMessage(
         maxAttachmentsPerMessage?: number;
         allowedAttachmentTypes?: string;
       }>();
-      const parsedAllowedTypes = attachmentConfig.allowedAttachmentTypes
-        ? attachmentConfig.allowedAttachmentTypes
-            .split(",")
-            .map((t) => t.split(";")[0].trim().toLowerCase())
-            .filter(Boolean)
-        : undefined;
+      const rawAllowedAttachmentTypes = attachmentConfig.allowedAttachmentTypes;
+      const parsedAllowedTypes =
+        rawAllowedAttachmentTypes !== undefined
+          ? rawAllowedAttachmentTypes
+              .split(",")
+              .map((t) => t.split(";")[0].trim().toLowerCase())
+              .filter(Boolean)
+          : undefined;
       // Treat an empty result (whitespace-only or comma-only config) as undefined so that
       // saveAttachments falls back to DEFAULT_ALLOWED_CONTENT_TYPES rather than disabling
       // the allowlist check entirely (fail-open security footgun).

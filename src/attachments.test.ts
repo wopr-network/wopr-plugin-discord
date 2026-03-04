@@ -346,6 +346,34 @@ describe("saveAttachments", () => {
     expect(result.length).toBe(1);
   });
 
+  it("normalizes custom allowedContentTypes entries (case-insensitive, strips params)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: (async function* () {
+        yield Buffer.from("data");
+      })(),
+    });
+
+    const msg = makeMessage([
+      { name: "photo.jpg", url: "https://cdn.discord.com/photo.jpg", size: 100, contentType: "image/jpeg" },
+      { name: "readme.txt", url: "https://cdn.discord.com/readme.txt", size: 100, contentType: "text/plain" },
+      { name: "doc.pdf", url: "https://cdn.discord.com/doc.pdf", size: 100, contentType: "application/pdf" },
+    ]);
+
+    // Pass mixed-case and parameterized entries in the custom allowlist
+    const result = await saveAttachments(msg, {
+      maxSizeBytes: 10_000_000,
+      maxPerMessage: 5,
+      allowedContentTypes: ["Image/JPEG", "text/plain; charset=utf-8"],
+    });
+
+    // image/jpeg and text/plain should match; application/pdf should be rejected
+    expect(result.length).toBe(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ msg: "Attachment content type not allowed", contentType: "application/pdf" }),
+    );
+  });
+
   it("AttachmentContentTypeError is thrown for rejected content types (instanceof check)", async () => {
     // The error class must be thrown so callers/metrics can detect it via instanceof.
     // saveAttachments catches it internally, so we verify it was wired by checking the warn log.
