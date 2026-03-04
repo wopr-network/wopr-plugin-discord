@@ -148,9 +148,7 @@ const configSchema: ConfigSchema = {
       description:
         "Comma-separated list of allowed MIME types for attachments (e.g. image/jpeg,image/png,text/plain,application/pdf)",
     },
-    // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
     { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },
-    // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
     { name: "mappings", type: "object", label: "Channel Mappings", hidden: true, default: {} },
   ],
 };
