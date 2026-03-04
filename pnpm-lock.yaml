@@ -31,8 +31,8 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18)
       '@wopr-network/plugin-types':
-        specifier: ^0.7.1
-        version: 0.7.1(zod@4.3.6)
+        specifier: ^0.9.0
+        version: 0.9.0(zod@4.3.6)
       '@wopr-network/semantic-release-config':
         specifier: ^1.0.0
         version: 1.0.0(semantic-release@24.2.9(typescript@5.9.3))
@@ -714,8 +714,8 @@ packages:
     resolution: {integrity: sha512-Xfe6rpCTxSxfbswi/W/Pz7zp1WWSNn4A0eW4mLkQUewCrXXtMj31lCg+iQyTkh/CkusZSq9eDflu7tjEDXUY6g==}
     engines: {node: '>=v14.0.0', npm: '>=7.0.0'}
 
-  '@wopr-network/plugin-types@0.7.1':
-    resolution: {integrity: sha512-8qUjjo3uC8sIcb/VS0LHAxsg53Q7sI/A3BlvUPMgLLia8VBzocHXsek2pTRMbNcxqNgzsx6Biur4GlQK7mAMJg==}
+  '@wopr-network/plugin-types@0.9.0':
+    resolution: {integrity: sha512-IZuOS2yDedofI8sSpspSE/Bl/7e2Z6MrDUlE6KdxCVGW7lS8lsoFBKuA/epcC3v9qqcIaghWc0IE0g4INRJCLw==}
     peerDependencies:
       zod: ^4.3.6
 
@@ -2798,7 +2798,7 @@ snapshots:
 
   '@vladfrangu/async_event_emitter@2.4.7': {}
 
-  '@wopr-network/plugin-types@0.7.1(zod@4.3.6)':
+  '@wopr-network/plugin-types@0.9.0(zod@4.3.6)':
     dependencies:
       zod: 4.3.6
 
