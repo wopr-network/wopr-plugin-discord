@@ -79,11 +79,15 @@ function makeMessage(attachments: Array<{ name: string; url: string; size: numbe
 }
 
 describe("saveAttachments", () => {
+  let originalFetch: typeof globalThis.fetch;
+
   beforeEach(() => {
+    originalFetch = globalThis.fetch;
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
