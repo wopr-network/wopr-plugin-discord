@@ -168,6 +168,13 @@ export async function handleFriendButtonInteraction(
   const parsed = parseButtonCustomId(interaction.customId);
   if (!parsed) return;
 
+  // Verify the clicking user is the bot owner
+  const ownerId = getOwnerUserId(ctx);
+  if (!ownerId || interaction.user.id !== ownerId) {
+    await interaction.reply({ content: "Unauthorized", ephemeral: true });
+    return;
+  }
+
   const pending = getPendingButtonRequest(parsed.from);
   if (!pending) {
     await interaction.reply({
