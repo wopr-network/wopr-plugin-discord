@@ -20,7 +20,7 @@ const DISCORD_LIMIT = 2000;
 // --------------------------------------------------------------------------
 type MessageState =
   | { status: "buffering"; content: string }
-  | { status: "sending"; content: string; promise: Promise<any> }
+  | { status: "sending"; content: string; promise: Promise<any>; pendingWhileSending: string }
   | { status: "sent"; content: string; discordMsg: any; lastEditLength: number }
   | { status: "finalized" };
 
@@ -62,7 +62,10 @@ class DiscordMessageUnit {
 
   append(text: string): void {
     if (this.state.status === "finalized") return;
-    if (this.state.status === "sending") return;
+    if (this.state.status === "sending") {
+      this.state = { ...this.state, pendingWhileSending: this.state.pendingWhileSending + text };
+      return;
+    }
     this.state = { ...this.state, content: this.state.content + text };
   }
 
@@ -93,14 +96,16 @@ class DiscordMessageUnit {
     if (this.state.status !== "buffering") return "skip";
 
     const promise = this.isReply ? this.replyTo.reply(content) : this.channel.send(content);
-    this.state = { status: "sending", content, promise };
+    this.state = { status: "sending", content, promise, pendingWhileSending: "" };
 
     try {
       const discordMsg = await promise;
-      this.state = { status: "sent", content, discordMsg, lastEditLength: content.length };
+      const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      this.state = { status: "sent", content: content + buffered, discordMsg, lastEditLength: content.length };
       return "ok";
     } catch (error) {
-      this.state = { status: "buffering", content };
+      const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      this.state = { status: "buffering", content: content + buffered };
       throw error;
     }
   }
@@ -122,17 +127,22 @@ class DiscordMessageUnit {
       splitAt = bestBreak;
     }
     const toSend = content.slice(0, splitAt);
-    const overflow = content.slice(splitAt).trimStart();
+    let overflow = content.slice(splitAt).trimStart();
 
     if (this.state.status === "buffering") {
       const promise = this.isReply ? this.replyTo.reply(toSend) : this.channel.send(toSend);
-      this.state = { status: "sending", content: toSend, promise };
+      this.state = { status: "sending", content: toSend, promise, pendingWhileSending: "" };
 
       try {
         await promise;
+        const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
         this.state = { status: "finalized" };
+        if (buffered) {
+          overflow = overflow + buffered;
+        }
       } catch (error) {
-        this.state = { status: "buffering", content };
+        const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+        this.state = { status: "buffering", content: content + buffered };
         throw error;
       }
     } else if (this.state.status === "sent") {
@@ -149,13 +159,21 @@ class DiscordMessageUnit {
 
     if (this.state.status === "sending") {
       try {
+        const sendContent = this.state.content;
         const discordMsg = await this.state.promise;
-        this.state = {
-          status: "sent",
-          content: this.state.content,
-          discordMsg,
-          lastEditLength: this.state.content.length,
-        };
+        if (this.state.status === "sending") {
+          // finalize won the race — read pendingWhileSending now, after the await
+          const pendingText = this.state.pendingWhileSending;
+          this.state = {
+            status: "sent",
+            content: sendContent + pendingText,
+            discordMsg,
+            lastEditLength: sendContent.length,
+          };
+        } else if (this.state.status === "finalized") {
+          return;
+        }
+        // else: sendInitial ran first and set state to "sent" — use that state below
       } catch {
         this.state = { status: "finalized" };
         return;
@@ -221,6 +239,54 @@ describe("DiscordMessageUnit - State Machine", () => {
     unit.append("Hello ");
     unit.append("world!");
     expect(unit.content).toBe("Hello world!");
+  });
+
+  it("should buffer text appended during sending state and flush after send completes", async () => {
+    let resolveSend: (msg: any) => void;
+    const sendPromise = new Promise<any>((r) => { resolveSend = r; });
+    replyTo.reply = vi.fn().mockReturnValue(sendPromise);
+
+    const unit = new DiscordMessageUnit(channel, replyTo, true);
+    unit.append("Hello");
+
+    // Start flush - enters sending state
+    const flushPromise = unit.flush();
+
+    // Append while sending - should be buffered, not dropped
+    unit.append(" world");
+    unit.append("!");
+
+    // Resolve the send
+    resolveSend!(sentMsg);
+    await flushPromise;
+
+    // Buffered content should be merged
+    expect(unit.content).toBe("Hello world!");
+    expect(unit.status).toBe("sent");
+  });
+
+  it("should flush buffered content through finalize when sending", async () => {
+    let resolveSend: (msg: any) => void;
+    const sendPromise = new Promise<any>((r) => { resolveSend = r; });
+    replyTo.reply = vi.fn().mockReturnValue(sendPromise);
+
+    const unit = new DiscordMessageUnit(channel, replyTo, true);
+    unit.append("start");
+
+    const flushPromise = unit.flush();
+
+    // Append while sending
+    unit.append(" end");
+
+    const finalizePromise = unit.finalize();
+
+    resolveSend!(sentMsg);
+    await flushPromise;
+    await finalizePromise;
+
+    expect(unit.isFinalized).toBe(true);
+    // The finalize should have edited with the merged content
+    expect(sentMsg.edit).toHaveBeenCalledWith("start end");
   });
 
   it("should ignore append when finalized", async () => {
@@ -431,6 +497,33 @@ describe("DiscordMessageUnit - State Machine", () => {
     expect(unit.isFinalized).toBe(true);
     expect(replyTo.reply).not.toHaveBeenCalled();
     expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it("should buffer text appended during handleOverflow send and merge in correct chronological order", async () => {
+    let resolveSend: (msg: any) => void;
+    const sendPromise = new Promise<any>((r) => { resolveSend = r; });
+    replyTo.reply = vi.fn().mockReturnValue(sendPromise);
+
+    const unit = new DiscordMessageUnit(channel, replyTo, true);
+    // 2000 'A' chars + 5 overflow chars
+    unit.append("A".repeat(DISCORD_LIMIT) + "EXTRA");
+
+    // Start flush — triggers handleOverflow, enters sending state
+    const flushPromise = unit.flush();
+
+    // Append while sending — should be buffered in pendingWhileSending
+    unit.append("PENDING");
+
+    // Resolve the send
+    resolveSend!(sentMsg);
+    const result = await flushPromise;
+
+    // handleOverflow returns "split"
+    expect(result).toBe("split");
+    // Unit is finalized after overflow handling
+    expect(unit.isFinalized).toBe(true);
+    // overflow must preserve chronological order: original tail first, then text appended during send
+    expect(unit.overflow).toBe("EXTRA" + "PENDING");
   });
 
   it("should truncate to DISCORD_LIMIT on finalize", async () => {
