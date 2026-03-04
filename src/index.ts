@@ -172,18 +172,17 @@ const plugin: WOPRPlugin = {
           try {
             // Read daemon auth token from $WOPR_HOME/daemon-token
             const { homedir } = await import("node:os");
-            const { existsSync, readFileSync } = await import("node:fs");
+            const { readFile } = await import("node:fs/promises");
             const { join } = await import("node:path");
             const woprHome = process.env.WOPR_HOME || join(homedir(), "wopr");
             const tokenPath = join(woprHome, "daemon-token");
 
             let authToken: string | null = null;
-            if (existsSync(tokenPath)) {
-              try {
-                authToken = readFileSync(tokenPath, "utf-8").trim() || null;
-              } catch {
-                // Token file unreadable — proceed without auth (will get 401)
-              }
+            try {
+              authToken = (await readFile(tokenPath, "utf-8")).trim() || null;
+            } catch {
+              // biome-ignore lint/suspicious/noConsole: CLI output
+              console.log(`Warning: could not read auth token from ${tokenPath} — proceeding without auth`);
             }
 
             const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -196,6 +195,17 @@ const plugin: WOPRPlugin = {
               headers,
               body: JSON.stringify({ code }),
             });
+            if (!response.ok) {
+              const status = response.status;
+              if (status === 401 || status === 403) {
+                // biome-ignore lint/suspicious/noConsole: CLI output
+                console.log(`Error: Authentication failed (${status}). Check your daemon token at ${tokenPath}.`);
+              } else {
+                // biome-ignore lint/suspicious/noConsole: CLI output
+                console.log(`Error: Daemon returned ${status}.`);
+              }
+              process.exit(1);
+            }
             const result = (await response.json()) as {
               success?: boolean;
               userId?: string;
