@@ -1,3 +1,4 @@
+import { describe, expect, it } from "vitest";
 import {
   autocompleteFocusedSchema,
   modelInputSchema,
@@ -280,6 +281,18 @@ describe("validateInput", () => {
     if (!result.success) {
       expect(typeof result.error).toBe("string");
       expect(result.error.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("returns 'Invalid input' as fallback when issues array is empty", () => {
+    // Exercise the `?? "Invalid input"` defensive branch in validateInput
+    const noIssuesSchema = {
+      safeParse: () => ({ success: false as const, error: { issues: [] } }),
+    } as unknown as Parameters<typeof validateInput>[0];
+    const result = validateInput(noIssuesSchema, "anything");
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error).toBe("Invalid input");
     }
   });
 
