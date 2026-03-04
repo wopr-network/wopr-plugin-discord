@@ -145,8 +145,11 @@ export async function executeInjectInternal(
     });
     logger.info({ msg: "executeInjectInternal - inject complete", sessionKey, streamKey });
 
-    await stream.finalize();
-    streams.delete(streamKey);
+    try {
+      await stream.finalize();
+    } finally {
+      streams.delete(streamKey);
+    }
 
     stopTyping(channelId, channel);
 
@@ -166,9 +169,16 @@ export async function executeInjectInternal(
       logger.info({ msg: "executeInjectInternal - inject was cancelled", sessionKey, streamKey });
       try {
         await stream.finalize();
+      } catch (e) {
+        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey });
+      } finally {
         streams.delete(streamKey);
+      }
+      try {
         await setMessageReaction(replyToMessage, REACTION_CANCELLED);
-      } catch (_e) {}
+      } catch (e) {
+        logger.debug("Reaction cleanup error (non-fatal)", { error: e, streamKey });
+      }
     } else {
       logger.error({
         msg: "executeInjectInternal - inject failed",
@@ -178,9 +188,16 @@ export async function executeInjectInternal(
       });
       try {
         await stream.finalize();
+      } catch (e) {
+        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey });
+      } finally {
         streams.delete(streamKey);
+      }
+      try {
         await setMessageReaction(replyToMessage, REACTION_ERROR);
-      } catch (_e) {}
+      } catch (e) {
+        logger.debug("Reaction cleanup error (non-fatal)", { error: e, streamKey });
+      }
     }
   }
 }
@@ -242,7 +259,9 @@ export async function handleMessage(
         name: (message.channel as { name?: string }).name,
       },
     });
-  } catch (_e) {}
+  } catch (e) {
+    logger.debug("logMessage error (non-fatal)", { error: e, sessionKey });
+  }
 
   queueManager.addToBuffer(channelId, {
     from: authorDisplayName,
