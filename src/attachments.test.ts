@@ -39,6 +39,11 @@ describe("saveAttachments", () => {
     mocks.existsSync.mockReturnValue(false);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
   it("returns empty array when message has no attachments", async () => {
     const msg = createMockMessage();
     const result = await saveAttachments(msg);
