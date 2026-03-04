@@ -96,7 +96,7 @@ describe("plugin lifecycle", () => {
 
   afterEach(async () => {
     await plugin.shutdown();
-    vi.resetAllMocks();
+    vi.clearAllMocks();
   });
 
   it("exports init and shutdown functions", () => {

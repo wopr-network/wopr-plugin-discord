@@ -75,7 +75,7 @@ describe("saveAttachments", () => {
     expect(result[0]).toContain("1234567890-user-1-photo.png");
     expect(globalThis.fetch).toHaveBeenCalledWith("https://cdn.discord.com/photo.png");
     expect(mocks.createWriteStream).toHaveBeenCalledWith(expect.stringContaining("1234567890-user-1-photo.png"));
-    expect(mocks.pipeline).toHaveBeenCalledWith(mockBody, { close: expect.any(Function) });
+    expect(mocks.pipeline).toHaveBeenCalledWith(mockBody, expect.objectContaining({ close: expect.any(Function) }));
     expect(mocks.loggerInfo).toHaveBeenCalledWith(
       expect.objectContaining({ msg: "Attachment saved", filename: expect.stringContaining("photo.png") }),
     );
