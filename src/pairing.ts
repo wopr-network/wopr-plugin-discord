@@ -11,11 +11,11 @@ import type { WOPRPluginContext } from "./types.js";
 // Pairing code settings
 const PAIRING_CODE_LENGTH = 8;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // No ambiguous chars
-const PAIRING_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+export const PAIRING_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 // Rate limiting for claim attempts
-const CLAIM_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
-const CLAIM_RATE_LIMIT_MAX_ATTEMPTS = 5; // max 5 attempts per window
+export const CLAIM_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute window
+export const CLAIM_RATE_LIMIT_MAX_ATTEMPTS = 5; // max 5 attempts per window
 
 interface ClaimAttempt {
   count: number;

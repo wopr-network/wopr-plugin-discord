@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPairingMessage,
+  CLAIM_RATE_LIMIT_MAX_ATTEMPTS,
+  CLAIM_RATE_LIMIT_WINDOW_MS,
   checkClaimRateLimit,
   claimPairingCode,
   cleanupExpiredPairings,
@@ -8,13 +10,10 @@ import {
   getPairingRequest,
   hasOwner,
   listPairingRequests,
+  PAIRING_CODE_TTL_MS,
   setOwner,
 } from "./pairing.js";
 import type { WOPRPluginContext } from "./types.js";
-
-const PAIRING_CODE_TTL_MS = 15 * 60 * 1000;
-const CLAIM_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const CLAIM_RATE_LIMIT_MAX_ATTEMPTS = 5;
 
 // Monotonically increasing base time per test to avoid cross-test state contamination
 let baseTime = new Date("2025-01-01T00:00:00Z").getTime();
