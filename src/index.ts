@@ -170,9 +170,30 @@ const plugin: WOPRPlugin = {
           }
 
           try {
+            // Read daemon auth token from $WOPR_HOME/daemon-token
+            const { homedir } = await import("node:os");
+            const { existsSync, readFileSync } = await import("node:fs");
+            const { join } = await import("node:path");
+            const woprHome = process.env.WOPR_HOME || join(homedir(), "wopr");
+            const tokenPath = join(woprHome, "daemon-token");
+
+            let authToken: string | null = null;
+            if (existsSync(tokenPath)) {
+              try {
+                authToken = readFileSync(tokenPath, "utf-8").trim() || null;
+              } catch {
+                // Token file unreadable — proceed without auth (will get 401)
+              }
+            }
+
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (authToken) {
+              headers.Authorization = `Bearer ${authToken}`;
+            }
+
             const response = await fetch("http://localhost:7437/plugins/discord/claim", {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers,
               body: JSON.stringify({ code }),
             });
             const result = (await response.json()) as {
