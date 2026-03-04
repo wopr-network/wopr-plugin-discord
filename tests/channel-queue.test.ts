@@ -904,14 +904,14 @@ describe("Channel Queue System", () => {
         queuedAt: Date.now(),
       };
 
-      // item1: chained onto the pre-rejected promise → .then() skipped, .catch() absorbs it
+      // item1: chained onto the pre-rejected promise → .catch() absorbs, .then() runs
       manager.queueInject(channelId, item);
-      // item2: chained onto the resolved promise from .catch() → .then() runs
+      // item2: chained onto the resolved promise → .catch() no-ops, .then() runs
       manager.queueInject(channelId, item);
 
       await vi.advanceTimersByTimeAsync(100);
 
-      expect(injectCallCount).toBe(1);
+      expect(injectCallCount).toBe(2);
     });
   });
 });

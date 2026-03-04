@@ -177,6 +177,9 @@ export class ChannelQueueManager {
     const queue = this.getChannelQueue(channelId);
 
     queue.processingChain = queue.processingChain
+      .catch((err) => {
+        logger.error({ msg: "Queue chain error", channelId, error: String(err) });
+      })
       .then(async () => {
         if (queue.currentInject?.cancelled) {
           logger.info({ msg: "Inject skipped - queue was cancelled", channelId, from: item.authorDisplayName });
@@ -195,9 +198,6 @@ export class ChannelQueueManager {
             queue.currentInject = null;
           }
         }
-      })
-      .catch((err) => {
-        logger.error({ msg: "Queue chain error", channelId, error: String(err) });
       });
   }
 
