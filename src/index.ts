@@ -6,6 +6,9 @@
  * in dedicated modules; this file is pure orchestration.
  */
 
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
@@ -171,18 +174,29 @@ const plugin: WOPRPlugin = {
 
           try {
             // Read daemon auth token from $WOPR_HOME/daemon-token
-            const { homedir } = await import("node:os");
-            const { readFile } = await import("node:fs/promises");
-            const { join } = await import("node:path");
-            const woprHome = process.env.WOPR_HOME || join(homedir(), "wopr");
+            // Default fallback mirrors the daemon's own convention (~/wopr)
+            const woprHome = process.env.WOPR_HOME ?? join(homedir(), "wopr");
             const tokenPath = join(woprHome, "daemon-token");
 
             let authToken: string | null = null;
             try {
-              authToken = (await readFile(tokenPath, "utf-8")).trim() || null;
-            } catch {
-              // biome-ignore lint/suspicious/noConsole: CLI output
-              console.log(`Warning: could not read auth token from ${tokenPath} — proceeding without auth`);
+              const raw = await readFile(tokenPath, "utf-8");
+              authToken = raw.trim() || null;
+            } catch (err: unknown) {
+              const fsCode = (err as NodeJS.ErrnoException).code;
+              if (fsCode !== "ENOENT") {
+                // File exists but is unreadable — warn so operators can diagnose
+                console.warn(
+                  `Warning: Could not read daemon auth token at ${tokenPath}: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              }
+              // ENOENT — token file absent, proceed without auth
+            }
+
+            // Guard against header injection via embedded newlines (outside the fs catch)
+            if (authToken && (authToken.includes("\n") || authToken.includes("\r"))) {
+              console.error(`Invalid daemon auth token (contains newline characters): ${tokenPath}`);
+              process.exit(1);
             }
 
             const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -195,23 +209,36 @@ const plugin: WOPRPlugin = {
               headers,
               body: JSON.stringify({ code }),
             });
+
+            // Check HTTP status before parsing body to surface clear errors
             if (!response.ok) {
-              const status = response.status;
-              if (status === 401 || status === 403) {
-                // biome-ignore lint/suspicious/noConsole: CLI output
-                console.log(`Error: Authentication failed (${status}). Check your daemon token at ${tokenPath}.`);
+              const rawBody = await response.text().catch(() => "");
+              let errorMsg: string;
+              try {
+                const errJson = rawBody ? (JSON.parse(rawBody) as { error?: string }) : {};
+                errorMsg = errJson.error ?? `HTTP ${response.status}`;
+              } catch {
+                errorMsg = rawBody || `HTTP ${response.status}`;
+              }
+              if (response.status === 401 || response.status === 403) {
+                console.error(`Authentication failed (${response.status}): ${errorMsg}`);
+                if (!authToken) {
+                  console.error(`  Daemon auth token not found at: ${tokenPath}`);
+                  console.error(`  Ensure WOPR daemon has written a token to that path.`);
+                }
               } else {
-                // biome-ignore lint/suspicious/noConsole: CLI output
-                console.log(`Error: Daemon returned ${status}.`);
+                console.error(`Failed to claim: ${errorMsg}`);
               }
               process.exit(1);
             }
-            const result = (await response.json()) as {
-              success?: boolean;
-              userId?: string;
-              username?: string;
-              error?: string;
-            };
+
+            const rawBody = await response.text();
+            let result: { success?: boolean; userId?: string; username?: string; error?: string } = {};
+            try {
+              result = rawBody ? (JSON.parse(rawBody) as typeof result) : {};
+            } catch {
+              result = { success: false, error: rawBody || "Invalid response from daemon" };
+            }
 
             if (result.success) {
               // biome-ignore lint/suspicious/noConsole: CLI output
@@ -220,15 +247,12 @@ const plugin: WOPRPlugin = {
               console.log(`  Owner: ${result.username} (${result.userId})`);
               process.exit(0);
             } else {
-              // biome-ignore lint/suspicious/noConsole: CLI output
-              console.log(`Failed to claim: ${result.error || "Unknown error"}`);
+              console.error(`Failed to claim: ${result.error || "Unknown error"}`);
               process.exit(1);
             }
           } catch (_err) {
-            // biome-ignore lint/suspicious/noConsole: CLI output
-            console.log(`Error: Could not connect to WOPR daemon. Is it running?`);
-            // biome-ignore lint/suspicious/noConsole: CLI output
-            console.log(`  Start it with: wopr daemon start`);
+            console.error(`Error: Could not connect to WOPR daemon. Is it running?`);
+            console.error(`  Start it with: wopr daemon start`);
             process.exit(1);
           }
         } else {
