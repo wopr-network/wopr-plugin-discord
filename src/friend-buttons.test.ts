@@ -1,13 +1,14 @@
 import type { ButtonInteraction } from "discord.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleFriendButtonInteraction, storePendingButtonRequest } from "./friend-buttons.js";
+import type { WOPRPluginContext } from "./types.js";
 
 // Minimal mock for WOPRPluginContext
-function mockCtx(ownerUserId: string | null) {
+function mockCtx(ownerUserId: string | null): WOPRPluginContext {
   return {
     getConfig: vi.fn(() => ({ ownerUserId: ownerUserId ?? undefined })),
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-  } as any;
+  } as unknown as WOPRPluginContext;
 }
 
 function mockInteraction(userId: string, customId: string) {
@@ -18,8 +19,8 @@ function mockInteraction(userId: string, customId: string) {
   return {
     user: { id: userId },
     customId,
-    replied: false,
     deferred: false,
+    replied: false,
     reply,
     deferUpdate,
     editReply,
@@ -79,9 +80,6 @@ describe("handleFriendButtonInteraction owner authorization", () => {
   it("allows owner to deny", async () => {
     const ctx = mockCtx("owner-123");
     const interaction = mockInteraction("owner-123", "friend_deny:alice");
-
-    // Re-store since previous test may have consumed it
-    expect(storePendingButtonRequest("alice", "a".repeat(64), "b".repeat(64), "chan-1", "sig-1")).toBeUndefined();
 
     await handleFriendButtonInteraction(interaction, ctx, "bot", onAccept, onDeny);
 

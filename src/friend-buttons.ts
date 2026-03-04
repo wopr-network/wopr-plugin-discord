@@ -11,6 +11,8 @@ import type { WOPRPluginContext } from "./types.js";
 // Align button request TTL with pairing code TTL (15 minutes)
 const BUTTON_REQUEST_TTL_MS = 15 * 60 * 1000;
 
+const UNAUTHORIZED_MESSAGE = "Unauthorized";
+
 // Discord custom ID max length is 100 characters
 const DISCORD_CUSTOM_ID_MAX_LENGTH = 100;
 // "friend_accept:" = 14 chars (longest prefix)
@@ -171,11 +173,12 @@ export async function handleFriendButtonInteraction(
   // Verify the clicking user is the bot owner
   const ownerId = getOwnerUserId(ctx);
   if (!ownerId || interaction.user.id !== ownerId) {
-    const replyFn =
-      interaction.replied || interaction.deferred
-        ? interaction.followUp.bind(interaction)
-        : interaction.reply.bind(interaction);
-    await replyFn({ content: "Unauthorized", ephemeral: true });
+    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload);
+    } else {
+      await interaction.reply(payload);
+    }
     return;
   }
 
