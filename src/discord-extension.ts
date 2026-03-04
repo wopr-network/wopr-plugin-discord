@@ -10,6 +10,7 @@ import {
   createFriendRequestButtons,
   createFriendRequestEmbed,
   getOwnerUserId,
+  setMessageIdOnPendingButtonRequest,
   storePendingButtonRequest,
 } from "./friend-buttons.js";
 import { logger } from "./logger.js";
@@ -80,10 +81,12 @@ async function sendFriendRequestNotification(
     const embed = createFriendRequestEmbed(requestFrom, pubkeyShort, channelName);
     const buttons = createFriendRequestButtons(requestFrom);
 
-    await owner.send({
+    const sentMessage = await owner.send({
       embeds: [embed],
       components: [buttons],
     });
+
+    setMessageIdOnPendingButtonRequest(requestFrom, sentMessage.id);
 
     logger.info({ msg: "Friend request notification sent to owner", requestFrom, ownerUserId: config.ownerUserId });
     return true;

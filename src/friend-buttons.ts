@@ -138,6 +138,16 @@ export function removePendingButtonRequest(requestFrom: string): void {
 }
 
 /**
+ * Bind a Discord message ID to a pending button request so we can verify provenance later
+ */
+export function setMessageIdOnPendingButtonRequest(requestFrom: string, messageId: string): void {
+  const pending = pendingButtonRequests.get(requestFrom.toLowerCase());
+  if (pending) {
+    pending.messageId = messageId;
+  }
+}
+
+/**
  * Check if an interaction is a friend request button
  */
 export function isFriendRequestButton(customId: string): boolean {
@@ -170,6 +180,18 @@ export async function handleFriendButtonInteraction(
   const parsed = parseButtonCustomId(interaction.customId);
   if (!parsed) return;
 
+  // Verify the button originated from this bot's own DM
+  const botId = interaction.client.user?.id;
+  if (!botId || interaction.message?.author?.id !== botId) {
+    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload);
+    } else {
+      await interaction.reply(payload);
+    }
+    return;
+  }
+
   // Verify the clicking user is the bot owner
   const ownerId = getOwnerUserId(ctx);
   if (!ownerId || interaction.user.id !== ownerId) {
@@ -188,6 +210,17 @@ export async function handleFriendButtonInteraction(
       content: `Friend request from @${parsed.from} has expired or was already handled.`,
       ephemeral: true,
     });
+    return;
+  }
+
+  // Verify the button's message ID matches the stored pending request
+  if (pending.messageId !== undefined && pending.messageId !== interaction.message?.id) {
+    const payload = { content: UNAUTHORIZED_MESSAGE, ephemeral: true } as const;
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload);
+    } else {
+      await interaction.reply(payload);
+    }
     return;
   }
 
