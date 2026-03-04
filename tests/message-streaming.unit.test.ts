@@ -104,7 +104,8 @@ class DiscordMessageUnit {
       this.state = { status: "sent", content: content + buffered, discordMsg, lastEditLength: content.length };
       return "ok";
     } catch (error) {
-      this.state = { status: "buffering", content };
+      const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      this.state = { status: "buffering", content: content + buffered };
       throw error;
     }
   }
@@ -137,10 +138,11 @@ class DiscordMessageUnit {
         const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
         this.state = { status: "finalized" };
         if (buffered) {
-          overflow = buffered + overflow;
+          overflow = overflow + buffered;
         }
       } catch (error) {
-        this.state = { status: "buffering", content };
+        const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+        this.state = { status: "buffering", content: content + buffered };
         throw error;
       }
     } else if (this.state.status === "sent") {
@@ -157,15 +159,21 @@ class DiscordMessageUnit {
 
     if (this.state.status === "sending") {
       try {
-        const pendingText = this.state.pendingWhileSending;
         const sendContent = this.state.content;
         const discordMsg = await this.state.promise;
-        this.state = {
-          status: "sent",
-          content: sendContent + pendingText,
-          discordMsg,
-          lastEditLength: sendContent.length,
-        };
+        if (this.state.status === "sending") {
+          // finalize won the race — read pendingWhileSending now, after the await
+          const pendingText = this.state.pendingWhileSending;
+          this.state = {
+            status: "sent",
+            content: sendContent + pendingText,
+            discordMsg,
+            lastEditLength: sendContent.length,
+          };
+        } else if (this.state.status === "finalized") {
+          return;
+        }
+        // else: sendInitial ran first and set state to "sent" — use that state below
       } catch {
         this.state = { status: "finalized" };
         return;
@@ -489,6 +497,33 @@ describe("DiscordMessageUnit - State Machine", () => {
     expect(unit.isFinalized).toBe(true);
     expect(replyTo.reply).not.toHaveBeenCalled();
     expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it("should buffer text appended during handleOverflow send and merge in correct chronological order", async () => {
+    let resolveSend: (msg: any) => void;
+    const sendPromise = new Promise<any>((r) => { resolveSend = r; });
+    replyTo.reply = vi.fn().mockReturnValue(sendPromise);
+
+    const unit = new DiscordMessageUnit(channel, replyTo, true);
+    // 2000 'A' chars + 5 overflow chars
+    unit.append("A".repeat(DISCORD_LIMIT) + "EXTRA");
+
+    // Start flush — triggers handleOverflow, enters sending state
+    const flushPromise = unit.flush();
+
+    // Append while sending — should be buffered in pendingWhileSending
+    unit.append("PENDING");
+
+    // Resolve the send
+    resolveSend!(sentMsg);
+    const result = await flushPromise;
+
+    // handleOverflow returns "split"
+    expect(result).toBe("split");
+    // Unit is finalized after overflow handling
+    expect(unit.isFinalized).toBe(true);
+    // overflow must preserve chronological order: original tail first, then text appended during send
+    expect(unit.overflow).toBe("EXTRA" + "PENDING");
   });
 
   it("should truncate to DISCORD_LIMIT on finalize", async () => {

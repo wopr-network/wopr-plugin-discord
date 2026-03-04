@@ -207,8 +207,8 @@ export class DiscordMessageUnit {
       logger.debug({ msg: "Unit.sendInitial success", unitId: this.unitId, msgId: discordMsg.id });
       return "ok";
     } catch (error) {
-      const lostText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
-      this.state = { status: "buffering", content: content + lostText };
+      const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      this.state = { status: "buffering", content: content + buffered };
       logger.error({ msg: "Unit.sendInitial failed", unitId: this.unitId, error: String(error) });
       throw error;
     }
@@ -261,8 +261,8 @@ export class DiscordMessageUnit {
         }
         logger.debug({ msg: "Unit.handleOverflow sent and finalized", unitId: this.unitId });
       } catch (error) {
-        const lostText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
-        this.state = { status: "buffering", content: content + lostText };
+        const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+        this.state = { status: "buffering", content: content + buffered };
         logger.error({ msg: "Unit.handleOverflow failed", unitId: this.unitId, error: String(error) });
         throw error;
       }
@@ -304,22 +304,33 @@ export class DiscordMessageUnit {
       logger.debug({ msg: "Unit.finalize waiting for send", unitId: this.unitId });
       try {
         const sendContent = this.state.content;
-        const promise = this.state.promise;
-        const discordMsg = await promise;
-        const pendingText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
-        this.state = {
-          status: "sent",
-          content: sendContent + pendingText,
-          discordMsg,
-          lastEditLength: sendContent.length,
-        };
-        if (pendingText) {
-          logger.debug({
-            msg: "Unit.finalize flushed buffered content",
-            unitId: this.unitId,
-            bufferedLen: pendingText.length,
-          });
+        const discordMsg = await this.state.promise;
+        // Re-read state after the await — concurrent sendInitial or handleOverflow
+        // may have updated this.state while the send was in-flight.
+        // Cast through unknown to reset TypeScript's narrowing from the outer if.
+        const stateAfterSend = this.state as unknown as MessageState;
+        if (stateAfterSend.status === "sending") {
+          // finalize won the race — read pendingWhileSending now, after the await
+          const pendingText = stateAfterSend.pendingWhileSending;
+          this.state = {
+            status: "sent",
+            content: sendContent + pendingText,
+            discordMsg,
+            lastEditLength: sendContent.length,
+          };
+          if (pendingText) {
+            logger.debug({
+              msg: "Unit.finalize flushed buffered content",
+              unitId: this.unitId,
+              bufferedLen: pendingText.length,
+            });
+          }
+        } else if (stateAfterSend.status === "finalized") {
+          // handleOverflow ran concurrently and already finalized this unit
+          logger.debug({ msg: "Unit.finalize already finalized during send", unitId: this.unitId });
+          return;
         }
+        // else: sendInitial ran first and set state to "sent" — use that state below
         logger.debug({ msg: "Unit.finalize send completed", unitId: this.unitId, msgId: discordMsg.id });
       } catch (error) {
         logger.error({ msg: "Unit.finalize send failed", unitId: this.unitId, error: String(error) });
