@@ -156,9 +156,13 @@ describe("pairingCodeSchema", () => {
     expect(r.success).toBe(false);
   });
 
-  it("rejects string over 16 characters", () => {
-    const r = pairingCodeSchema.safeParse("A".repeat(17));
-    expect(r.success).toBe(false);
+  it("rejects string not exactly 8 characters", () => {
+    expect(pairingCodeSchema.safeParse("A".repeat(7)).success).toBe(false);
+    expect(pairingCodeSchema.safeParse("A".repeat(9)).success).toBe(false);
+  });
+
+  it("accepts exactly 8 characters", () => {
+    expect(pairingCodeSchema.safeParse("A".repeat(8)).success).toBe(true);
   });
 
   it("rejects characters outside alphabet (0, 1)", () => {
@@ -270,9 +274,13 @@ describe("validateInput", () => {
     }
   });
 
-  it("returns 'Invalid input' as fallback when no issue message", () => {
+  it("returns error string when input fails type check", () => {
     const result = validateInput(sessionNameSchema, 123);
     expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(typeof result.error).toBe("string");
+      expect(result.error.length).toBeGreaterThan(0);
+    }
   });
 
   it("works with enum schemas", () => {
