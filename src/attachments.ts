@@ -138,13 +138,11 @@ async function downloadAttachment(url: string, filepath: string, maxSize: number
     // body stream is terminated by the same 30s timeout.
     await pipeline(nodeStream, sizeGuard, fileStream, { signal: controller.signal });
   } catch (err) {
-    // Clean up partial file on failure — destroy stream first to avoid EBUSY on Windows
+    // Clean up partial file on failure — destroy stream first to avoid EBUSY on Windows,
+    // then cancel the response body to release the network stream.
     fileStream.destroy();
-    try {
-      await unlink(filepath);
-    } catch {
-      // ignore cleanup errors
-    }
+    await response.body?.cancel().catch(() => {});
+    await unlink(filepath).catch(() => {});
     throw err;
   } finally {
     clearTimeout(timeout);
