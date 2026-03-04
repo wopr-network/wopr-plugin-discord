@@ -32,8 +32,9 @@ src/
   attachments.ts        # File/image attachment handling
   typing-manager.ts     # Typing indicator management
   discord-utils.ts      # Shared helpers
-  discord-extension.ts  # Extension hooks
-  webmcp-discord.ts     # WebMCP integration
+  discord-extension.ts  # Extension hooks (WebMCP integration entry point)
+  components-v2.ts      # Discord Components v2 builders
+  validation.ts         # Input validation helpers
   logger.ts             # Winston logger instance
   types.ts              # Plugin-local types
 ```
