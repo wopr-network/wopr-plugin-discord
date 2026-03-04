@@ -31,7 +31,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "@wopr-network/plugin-types": ">=0.7.0"
+    "@wopr-network/plugin-types": "^0.7.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.4",
