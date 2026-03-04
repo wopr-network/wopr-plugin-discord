@@ -521,4 +521,15 @@ describe("findChannelIdFromSession", () => {
     expect(result).toBe("ch-thread");
     expect((ctx as any).session.readConversationLog).toHaveBeenCalledWith("discord:my-guild:#general/my-thread");
   });
+
+  it("should truncate sessionName in warn log to avoid PII leakage", async () => {
+    const ctx = createMockContext();
+    (ctx as any).session.readConversationLog = vi.fn().mockResolvedValue([]);
+    await findChannelIdFromSession(ctx, "../../etc/passwd");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionName: expect.stringMatching(/^.{0,64}$/),
+      }),
+    );
+  });
 });

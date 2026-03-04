@@ -51,7 +51,10 @@ export async function findChannelIdFromSession(ctx: WOPRPluginContext, sessionNa
   // Defense-in-depth: reject session names with unsafe characters or traversal segments.
   // Note: '/' is allowed because thread session keys include it (e.g. discord:guild:#parent/thread).
   if (sessionName.includes("\u0000") || sessionName.includes("\\") || /(^|\/)\.\.(\/|$)/.test(sessionName)) {
-    logger.warn({ msg: "Rejected session name with unsafe characters or path traversal" });
+    logger.warn({
+      msg: "Rejected session name with unsafe characters or path traversal",
+      sessionName: sessionName.slice(0, 64),
+    });
     return null;
   }
   const ctxWithSession = ctx as unknown as CtxWithSession;
