@@ -581,19 +581,47 @@ describe("Channel Queue System", () => {
   describe("Promise chain ordering", () => {
     it("should process human messages sequentially in order", async () => {
       const injectOrder: string[] = [];
-      const { ctx, shutdown } = await setupPlugin({ injectDelay: 30 });
+      let inFlight = 0;
+      const injectDelay = 30;
+      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay });
 
       let callCount = 0;
       (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, msg: string) => {
+        // Assert non-overlapping: no other inject should be running concurrently
+        expect(inFlight).toBe(0);
+        inFlight++;
         callCount++;
         injectOrder.push(msg);
-        await new Promise((r) => setTimeout(r, 30));
-        return `Response ${callCount}`;
+        try {
+          await new Promise((r) => setTimeout(r, injectDelay));
+          return `Response ${callCount}`;
+        } finally {
+          inFlight--;
+        }
       });
 
-      // This test verifies ordering conceptually. The promise chain ensures
-      // that message A completes before message B starts processing.
-      expect(true).toBe(true); // Structural test passes
+      const channelId = "ch-order-test";
+      const msg1 = createHumanMessage(channelId, "First message");
+      const msg2 = createHumanMessage(channelId, "Second message");
+      const msg3 = createHumanMessage(channelId, "Third message");
+
+      // Dispatch all three without awaiting between calls so the queue is under
+      // concurrency pressure — this is what actually exercises FIFO enforcement
+      const p1 = handleMessage(msg1);
+      const p2 = handleMessage(msg2);
+      const p3 = handleMessage(msg3);
+
+      // Advance enough time for all 3 messages to process sequentially, derived
+      // from injectDelay so the test stays accurate if the delay changes
+      await vi.advanceTimersByTimeAsync(injectDelay * 4);
+      await Promise.all([p1, p2, p3]);
+
+      // Verify all three were injected in FIFO order with no overlap
+      expect(injectOrder.length).toBe(3);
+      expect(injectOrder[0]).toContain("First message");
+      expect(injectOrder[1]).toContain("Second message");
+      expect(injectOrder[2]).toContain("Third message");
+
       await shutdown();
     });
 
