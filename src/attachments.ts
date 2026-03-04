@@ -122,10 +122,11 @@ async function downloadAttachment(url: string, filepath: string, maxSize: number
     },
   });
 
-  // Guard against body already being a Node.js Readable (mocks/polyfills)
+  // Guard against body already being a Node.js Readable (mocks/polyfills).
+  // Use duck-typing (pipe method) rather than instanceof to work with mocked Readable.
   const nodeStream =
-    response.body instanceof Readable
-      ? response.body
+    response.body && typeof (response.body as unknown as { pipe?: unknown }).pipe === "function"
+      ? (response.body as unknown as InstanceType<typeof Readable>)
       : response.body
         ? Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
         : Readable.from([]);
