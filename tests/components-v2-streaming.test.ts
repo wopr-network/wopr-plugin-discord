@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { ComponentType, MessageFlags } from "discord.js";
 import { createMockTextChannel, createMockMessage } from "./mocks/discord-client.js";
 
 describe("DiscordMessageUnit with Components v2", () => {
@@ -16,9 +17,9 @@ describe("DiscordMessageUnit with Components v2", () => {
     expect(replyTo.reply).toHaveBeenCalledTimes(1);
     const payload = replyTo.reply.mock.calls[0][0];
     expect(typeof payload).toBe("object");
-    expect(payload.flags).toBeDefined();
-    expect(payload.components).toBeDefined();
-    expect(payload.components.length).toBe(1);
+    expect(payload.flags).toBe(MessageFlags.IsComponentsV2);
+    expect(payload.components).toHaveLength(1);
+    expect(payload.components[0].toJSON().type).toBe(ComponentType.Container);
   });
 
   it("should send plain string when useComponentsV2 is false", async () => {
@@ -54,7 +55,8 @@ describe("DiscordMessageUnit with Components v2", () => {
     expect(editMock).toHaveBeenCalledTimes(1);
     const editPayload = editMock.mock.calls[0][0];
     expect(typeof editPayload).toBe("object");
-    expect(editPayload.components).toBeDefined();
+    expect(editPayload.components).toHaveLength(1);
+    expect(editPayload.components[0].toJSON().type).toBe(ComponentType.Container);
     // No flags on edit
     expect(editPayload.flags).toBeUndefined();
   });
