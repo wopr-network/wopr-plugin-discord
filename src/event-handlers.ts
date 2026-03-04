@@ -297,10 +297,18 @@ export async function handleMessage(
       const attachmentConfig = ctx.getConfig<{
         maxAttachmentSizeBytes?: number;
         maxAttachmentsPerMessage?: number;
+        allowedAttachmentTypes?: string;
       }>();
+      const allowedTypes = attachmentConfig.allowedAttachmentTypes
+        ? attachmentConfig.allowedAttachmentTypes
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean)
+        : undefined;
       const attachmentPaths = await saveAttachments(message, {
         maxSizeBytes: attachmentConfig.maxAttachmentSizeBytes,
         maxPerMessage: attachmentConfig.maxAttachmentsPerMessage,
+        allowedContentTypes: allowedTypes,
       });
       if (attachmentPaths.length > 0) {
         const attachmentInfo = attachmentPaths.map((p) => `[Attachment: ${p}]`).join("\n");
