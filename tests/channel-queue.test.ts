@@ -581,7 +581,7 @@ describe("Channel Queue System", () => {
   describe("Promise chain ordering", () => {
     it("should process human messages sequentially in order", async () => {
       const injectOrder: string[] = [];
-      const { ctx, shutdown } = await setupPlugin({ injectDelay: 30 });
+      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay: 30 });
 
       let callCount = 0;
       (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, msg: string) => {
@@ -591,9 +591,25 @@ describe("Channel Queue System", () => {
         return `Response ${callCount}`;
       });
 
-      // This test verifies ordering conceptually. The promise chain ensures
-      // that message A completes before message B starts processing.
-      expect(true).toBe(true); // Structural test passes
+      const channelId = "ch-order-test";
+      const msg1 = createHumanMessage(channelId, "First message");
+      const msg2 = createHumanMessage(channelId, "Second message");
+      const msg3 = createHumanMessage(channelId, "Third message");
+
+      // Send three messages to the same channel
+      await handleMessage(msg1);
+      await handleMessage(msg2);
+      await handleMessage(msg3);
+
+      // Advance timers to let the promise chain process all three
+      await vi.advanceTimersByTimeAsync(500);
+
+      // Verify all three were injected in FIFO order
+      expect(injectOrder.length).toBe(3);
+      expect(injectOrder[0]).toContain("First message");
+      expect(injectOrder[1]).toContain("Second message");
+      expect(injectOrder[2]).toContain("Third message");
+
       await shutdown();
     });
 
