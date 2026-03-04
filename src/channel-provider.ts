@@ -125,7 +125,7 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
     return true;
   } catch (error) {
     logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
-    await message.reply(`Error executing /${cmdName}: ${error}`);
+    await message.reply(`Error executing /${cmdName}. Please try again later.`);
     return true; // Still handled, just with error
   }
 }

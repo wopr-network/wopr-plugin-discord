@@ -152,8 +152,9 @@ export async function handleFriendButtonInteraction(
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} accepted via button`);
     } catch (err) {
+      ctx.log.error("[discord] Failed to accept friend request", { from: parsed.from, err });
       await interaction.followUp({
-        content: `Failed to accept friend request: ${err}`,
+        content: "Failed to accept friend request. Please try again later.",
         ephemeral: true,
       });
     }
@@ -169,8 +170,9 @@ export async function handleFriendButtonInteraction(
 
       ctx.log.info(`[discord] Friend request from ${parsed.from} denied via button`);
     } catch (err) {
+      ctx.log.error("[discord] Failed to deny friend request", { from: parsed.from, err });
       await interaction.followUp({
-        content: `Failed to deny friend request: ${err}`,
+        content: "Failed to deny friend request. Please try again later.",
         ephemeral: true,
       });
     }

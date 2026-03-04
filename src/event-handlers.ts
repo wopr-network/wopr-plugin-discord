@@ -297,10 +297,29 @@ export async function handleMessage(
       const attachmentConfig = ctx.getConfig<{
         maxAttachmentSizeBytes?: number;
         maxAttachmentsPerMessage?: number;
+        allowedAttachmentTypes?: string;
       }>();
+      const rawAllowedAttachmentTypes = attachmentConfig.allowedAttachmentTypes;
+      const parsedAllowedTypes =
+        rawAllowedAttachmentTypes !== undefined
+          ? rawAllowedAttachmentTypes
+              .split(",")
+              .map((t) => t.split(";")[0].trim().toLowerCase())
+              .filter(Boolean)
+          : undefined;
+      // Treat an empty result (whitespace-only or comma-only config) as undefined so that
+      // saveAttachments falls back to DEFAULT_ALLOWED_CONTENT_TYPES rather than disabling
+      // the allowlist check entirely (fail-open security footgun).
+      if (parsedAllowedTypes !== undefined && parsedAllowedTypes.length === 0) {
+        logger.warn({
+          msg: "allowedAttachmentTypes config is set but produced no valid types — falling back to defaults",
+        });
+      }
+      const allowedTypes = parsedAllowedTypes?.length ? parsedAllowedTypes : undefined;
       const attachmentPaths = await saveAttachments(message, {
         maxSizeBytes: attachmentConfig.maxAttachmentSizeBytes,
         maxPerMessage: attachmentConfig.maxAttachmentsPerMessage,
+        allowedContentTypes: allowedTypes,
       });
       if (attachmentPaths.length > 0) {
         const attachmentInfo = attachmentPaths.map((p) => `[Attachment: ${p}]`).join("\n");

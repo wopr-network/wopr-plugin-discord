@@ -10,7 +10,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
-import { DEFAULT_MAX_PER_MESSAGE, DEFAULT_MAX_SIZE_BYTES } from "./attachments.js";
+import { DEFAULT_ALLOWED_CONTENT_TYPES, DEFAULT_MAX_PER_MESSAGE, DEFAULT_MAX_SIZE_BYTES } from "./attachments.js";
 import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
 import {
@@ -139,6 +139,14 @@ const configSchema: ConfigSchema = {
       label: "Max Attachments Per Message",
       default: DEFAULT_MAX_PER_MESSAGE,
       description: "Maximum number of attachments to download per message (default 5)",
+    },
+    {
+      name: "allowedAttachmentTypes",
+      type: "text",
+      label: "Allowed Attachment Types",
+      default: DEFAULT_ALLOWED_CONTENT_TYPES.join(","),
+      description:
+        "Comma-separated list of allowed MIME types for attachments (e.g. image/jpeg,image/png,text/plain,application/pdf)",
     },
     // @ts-expect-error hidden not in shared ConfigField yet — needed to suppress config UI
     { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },
