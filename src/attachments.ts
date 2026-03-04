@@ -58,10 +58,11 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
   // Treat empty array the same as "not configured" — fall back to the default allowlist so a
   // misconfigured/empty allowedContentTypes can never silently disable the content-type check.
   const configuredAllowedTypes = limits?.allowedContentTypes;
-  const allowedTypes =
+  const allowedTypes = (
     Array.isArray(configuredAllowedTypes) && configuredAllowedTypes.length > 0
       ? configuredAllowedTypes
-      : DEFAULT_ALLOWED_CONTENT_TYPES;
+      : DEFAULT_ALLOWED_CONTENT_TYPES
+  ).map((t) => t.split(";")[0].trim().toLowerCase());
   // Sanitize: fall back to defaults for invalid (NaN / Infinity / negative) values
   const maxSize = Number.isFinite(rawMaxSize) && rawMaxSize > 0 ? rawMaxSize : DEFAULT_MAX_SIZE_BYTES;
   const maxCount = Number.isFinite(rawMaxCount) && rawMaxCount >= 0 ? Math.floor(rawMaxCount) : DEFAULT_MAX_PER_MESSAGE;

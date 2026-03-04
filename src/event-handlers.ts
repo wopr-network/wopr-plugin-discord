@@ -302,7 +302,7 @@ export async function handleMessage(
       const parsedAllowedTypes = attachmentConfig.allowedAttachmentTypes
         ? attachmentConfig.allowedAttachmentTypes
             .split(",")
-            .map((t) => t.trim())
+            .map((t) => t.split(";")[0].trim().toLowerCase())
             .filter(Boolean)
         : undefined;
       // Treat an empty result (whitespace-only or comma-only config) as undefined so that
