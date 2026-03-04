@@ -147,6 +147,8 @@ export async function executeInjectInternal(
 
     try {
       await stream.finalize();
+    } catch (e) {
+      logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey, sessionKey });
     } finally {
       streams.delete(streamKey);
     }
@@ -170,7 +172,7 @@ export async function executeInjectInternal(
       try {
         await stream.finalize();
       } catch (e) {
-        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey });
+        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey, sessionKey });
       } finally {
         streams.delete(streamKey);
       }
@@ -189,7 +191,7 @@ export async function executeInjectInternal(
       try {
         await stream.finalize();
       } catch (e) {
-        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey });
+        logger.debug("Stream cleanup error (non-fatal)", { error: e, streamKey, sessionKey });
       } finally {
         streams.delete(streamKey);
       }

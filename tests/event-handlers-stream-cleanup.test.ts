@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const mockStreams = vi.hoisted(() => new Map());
+const mockStreams = vi.hoisted(() => {
+  const backing = new Map<string, unknown>();
+  return {
+    set: vi.fn((k: string, v: unknown) => backing.set(k, v)),
+    delete: vi.fn((k: string) => backing.delete(k)),
+    has: vi.fn((k: string) => backing.has(k)),
+    clear: vi.fn(() => backing.clear()),
+  } as any;
+});
 const MockDiscordMessageStream = vi.hoisted(() => {
   const ctor = vi.fn().mockImplementation(function (this: unknown) {
     return (ctor as any)._mockInstance;
@@ -55,8 +63,9 @@ vi.mock("../src/identity-manager.js", () => ({
 }));
 
 import { executeInjectInternal } from "../src/event-handlers.js";
-import { DiscordMessageStream } from "../src/message-streaming.js";
 import { logger } from "../src/logger.js";
+import { setMessageReaction } from "../src/reaction-manager.js";
+import { stopTyping } from "../src/typing-manager.js";
 
 describe("executeInjectInternal stream cleanup", () => {
   const mockChannel = { id: "ch1", name: "test" };
@@ -69,17 +78,32 @@ describe("executeInjectInternal stream cleanup", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockStreams.clear();
+    mockStreams.set.mockClear();
+    mockStreams.delete.mockClear();
+    mockStreams.has.mockClear();
   });
 
   function makeStreamMock(finalizeResult: "resolve" | "reject") {
     const mockStream = {
-      finalize: finalizeResult === "reject"
-        ? vi.fn().mockRejectedValue(new Error("finalize failed"))
-        : vi.fn().mockResolvedValue(undefined),
+      finalize:
+        finalizeResult === "reject"
+          ? vi.fn().mockRejectedValue(new Error("finalize failed"))
+          : vi.fn().mockResolvedValue(undefined),
       append: vi.fn(),
     };
     (MockDiscordMessageStream as any)._mockInstance = mockStream;
     return mockStream;
+  }
+
+  function makeItem() {
+    return {
+      sessionKey: "discord:test",
+      messageContent: "hello",
+      authorDisplayName: "user",
+      replyToMessage: mockReplyMessage as any,
+      isBot: false,
+      queuedAt: Date.now(),
+    };
   }
 
   it("should delete stream even when finalize() throws during cancel path", async () => {
@@ -96,24 +120,13 @@ describe("executeInjectInternal stream cleanup", () => {
       clearBuffer: vi.fn(),
     };
 
-    await executeInjectInternal(
-      {
-        sessionKey: "discord:test",
-        messageContent: "hello",
-        authorDisplayName: "user",
-        replyToMessage: mockReplyMessage as any,
-        isBot: false,
-        queuedAt: Date.now(),
-      },
-      cancelToken,
-      mockCtx as any,
-      mockQueueManager as any,
-    );
+    await executeInjectInternal(makeItem(), cancelToken, mockCtx as any, mockQueueManager as any);
 
+    expect(mockStreams.set).toHaveBeenCalledWith("msg1", expect.anything());
     expect(mockStreams.has("msg1")).toBe(false);
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining("Stream cleanup error"),
-      expect.objectContaining({ error: expect.anything() }),
+      expect.objectContaining({ error: expect.anything(), sessionKey: "discord:test" }),
     );
   });
 
@@ -131,24 +144,40 @@ describe("executeInjectInternal stream cleanup", () => {
       clearBuffer: vi.fn(),
     };
 
-    await executeInjectInternal(
-      {
-        sessionKey: "discord:test",
-        messageContent: "hello",
-        authorDisplayName: "user",
-        replyToMessage: mockReplyMessage as any,
-        isBot: false,
-        queuedAt: Date.now(),
-      },
-      cancelToken,
-      mockCtx as any,
-      mockQueueManager as any,
-    );
+    await executeInjectInternal(makeItem(), cancelToken, mockCtx as any, mockQueueManager as any);
 
+    expect(mockStreams.set).toHaveBeenCalledWith("msg1", expect.anything());
     expect(mockStreams.has("msg1")).toBe(false);
     expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining("Stream cleanup error"),
-      expect.objectContaining({ error: expect.anything() }),
+      expect.objectContaining({ error: expect.anything(), sessionKey: "discord:test" }),
     );
+  });
+
+  it("should delete stream and continue cleanup when finalize() throws during success path", async () => {
+    makeStreamMock("reject");
+
+    const cancelToken = { cancelled: false };
+    const mockCtx = {
+      inject: vi.fn().mockResolvedValue(undefined),
+      getConfig: vi.fn().mockReturnValue({}),
+      logMessage: vi.fn(),
+    };
+    const mockQueueManager = {
+      getSessionState: vi.fn().mockReturnValue({ messageCount: 0, thinkingLevel: "medium" }),
+      clearBuffer: vi.fn(),
+    };
+
+    await executeInjectInternal(makeItem(), cancelToken, mockCtx as any, mockQueueManager as any);
+
+    expect(mockStreams.set).toHaveBeenCalledWith("msg1", expect.anything());
+    expect(mockStreams.has("msg1")).toBe(false);
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining("Stream cleanup error"),
+      expect.objectContaining({ error: expect.anything(), sessionKey: "discord:test" }),
+    );
+    // Cleanup should continue: stopTyping and setMessageReaction(REACTION_DONE) must still run
+    expect(stopTyping).toHaveBeenCalled();
+    expect(setMessageReaction).toHaveBeenCalledWith(mockReplyMessage, "done");
   });
 });
