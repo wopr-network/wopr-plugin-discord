@@ -14,6 +14,7 @@
  * - Channels are independent (no cross-channel interference)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ChannelQueueManager, type QueuedInject } from "../src/channel-queue.js";
 import { createMockClient, createMockMessage, createMockTextChannel, createMockUser } from "./mocks/discord-client.js";
 import { createMockContext } from "./mocks/wopr-context.js";
 
@@ -835,6 +836,82 @@ describe("Channel Queue System", () => {
       expect(ctx.inject).not.toHaveBeenCalled();
 
       await shutdown();
+    });
+  });
+
+  // =========================================================================
+  // Chain error resilience (WOP-1560)
+  // =========================================================================
+
+  describe("Chain error resilience (WOP-1560)", () => {
+    it("should continue processing after a chain error", async () => {
+      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay: 10 });
+
+      const channelId = "ch-resilience-1";
+
+      let callCount = 0;
+      (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, _msg: string) => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("Corrupted item simulation");
+        }
+        return "OK";
+      });
+
+      const msg1 = createHumanMessage(channelId, "Will fail");
+      const msg2 = createHumanMessage(channelId, "Should still process");
+
+      await handleMessage(msg1);
+      await handleMessage(msg2);
+
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(callCount).toBe(2);
+
+      await shutdown();
+    });
+
+    it("should process subsequent items after a pre-rejected processingChain", async () => {
+      // Directly exercises the outer .catch() on processingChain (WOP-1560 targeted).
+      // A pre-rejected chain simulates state that escapes the inner try/catch.
+      // Without .catch(): all .then() handlers are skipped → callCount stays 0.
+      // With .catch(): rejection is absorbed after item1, so item2 executes → callCount === 1.
+
+      let injectCallCount = 0;
+      const manager = new ChannelQueueManager(async () => {
+        injectCallCount++;
+      });
+      const channelId = "ch-pre-rejected";
+
+      // Suppress unhandled-rejection warning; this rejection is intentional
+      const preRejected = Promise.reject(new Error("Simulated pre-existing chain failure"));
+      preRejected.catch(() => {});
+
+      (manager as any).channelQueues.set(channelId, {
+        buffer: [],
+        processingChain: preRejected,
+        pendingItems: [],
+        humanTypingUntil: 0,
+        currentInject: null,
+      });
+
+      const item: QueuedInject = {
+        sessionKey: "test-session",
+        messageContent: "post-failure item",
+        authorDisplayName: "TestUser",
+        replyToMessage: {} as any,
+        isBot: false,
+        queuedAt: Date.now(),
+      };
+
+      // item1: chained onto the pre-rejected promise → .catch() absorbs, .then() runs
+      manager.queueInject(channelId, item);
+      // item2: chained onto the resolved promise → .catch() no-ops, .then() runs
+      manager.queueInject(channelId, item);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(injectCallCount).toBe(2);
     });
   });
 });
