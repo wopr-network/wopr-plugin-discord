@@ -207,7 +207,8 @@ export class DiscordMessageUnit {
       logger.debug({ msg: "Unit.sendInitial success", unitId: this.unitId, msgId: discordMsg.id });
       return "ok";
     } catch (error) {
-      this.state = { status: "buffering", content };
+      const lostText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+      this.state = { status: "buffering", content: content + lostText };
       logger.error({ msg: "Unit.sendInitial failed", unitId: this.unitId, error: String(error) });
       throw error;
     }
@@ -256,11 +257,12 @@ export class DiscordMessageUnit {
         const buffered = this.state.status === "sending" ? this.state.pendingWhileSending : "";
         this.state = { status: "finalized" };
         if (buffered) {
-          overflow = buffered + overflow;
+          overflow = overflow + buffered;
         }
         logger.debug({ msg: "Unit.handleOverflow sent and finalized", unitId: this.unitId });
       } catch (error) {
-        this.state = { status: "buffering", content };
+        const lostText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
+        this.state = { status: "buffering", content: content + lostText };
         logger.error({ msg: "Unit.handleOverflow failed", unitId: this.unitId, error: String(error) });
         throw error;
       }
@@ -301,9 +303,10 @@ export class DiscordMessageUnit {
     if (this.state.status === "sending") {
       logger.debug({ msg: "Unit.finalize waiting for send", unitId: this.unitId });
       try {
-        const pendingText = this.state.pendingWhileSending;
         const sendContent = this.state.content;
-        const discordMsg = await this.state.promise;
+        const promise = this.state.promise;
+        const discordMsg = await promise;
+        const pendingText = this.state.status === "sending" ? this.state.pendingWhileSending : "";
         this.state = {
           status: "sent",
           content: sendContent + pendingText,
