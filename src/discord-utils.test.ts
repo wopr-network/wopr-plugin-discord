@@ -1,3 +1,4 @@
+import { DMChannel, TextChannel, ThreadChannel } from "discord.js";
 import { describe, expect, it, vi } from "vitest";
 import { getSessionKey, getSessionKeyFromInteraction, resolveMentions } from "./discord-utils.js";
 
@@ -134,6 +135,42 @@ describe("discord-utils", () => {
         channelId: "ch-456",
       } as any;
       expect(getSessionKeyFromInteraction(interaction)).toBe("discord:ch-456");
+    });
+
+    it("uses getSessionKey when channel is instanceof TextChannel", () => {
+      // Create an object whose prototype chain includes TextChannel so instanceof passes
+      const channel = Object.assign(Object.create(TextChannel.prototype), {
+        name: "general",
+        guild: { name: "Test Guild" },
+        isDMBased: () => false,
+        isThread: () => false,
+      });
+      const interaction = { channel, channelId: "ch-789" } as any;
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:test-guild:#general");
+    });
+
+    it("uses getSessionKey when channel is instanceof ThreadChannel", () => {
+      const channel = Object.create(ThreadChannel.prototype);
+      Object.defineProperties(channel, {
+        name: { value: "my-thread", writable: true, configurable: true },
+        guild: { value: { name: "Test Guild" }, writable: true, configurable: true },
+        parent: { value: { name: "general" }, writable: true, configurable: true },
+        isDMBased: { value: () => false, writable: true, configurable: true },
+        isThread: { value: () => true, writable: true, configurable: true },
+      });
+      const interaction = { channel, channelId: "ch-790" } as any;
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:test-guild:#general/my-thread");
+    });
+
+    it("uses getSessionKey when channel is instanceof DMChannel", () => {
+      const channel = Object.create(DMChannel.prototype);
+      Object.defineProperties(channel, {
+        recipient: { value: { username: "alice" }, writable: true, configurable: true },
+        isDMBased: { value: () => true, writable: true, configurable: true },
+        isThread: { value: () => false, writable: true, configurable: true },
+      });
+      const interaction = { channel, channelId: "ch-791" } as any;
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:dm:alice");
     });
   });
 
