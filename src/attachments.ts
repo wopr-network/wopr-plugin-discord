@@ -34,14 +34,6 @@ export interface AttachmentLimits {
   allowedContentTypes: readonly string[];
 }
 
-export class AttachmentContentTypeError extends Error {
-  readonly code = "ATTACHMENT_CONTENT_TYPE_REJECTED";
-  constructor(contentType: string | null) {
-    super(`Attachment content type not allowed: ${contentType ?? "unknown"}`);
-    this.name = "AttachmentContentTypeError";
-  }
-}
-
 export class AttachmentSizeLimitError extends Error {
   readonly code = "ATTACHMENT_SIZE_LIMIT_EXCEEDED";
   constructor(bytesReceived: number, maxSize: number) {
@@ -55,7 +47,9 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
 
   const rawMaxSize = limits?.maxSizeBytes ?? DEFAULT_MAX_SIZE_BYTES;
   const rawMaxCount = limits?.maxPerMessage ?? DEFAULT_MAX_PER_MESSAGE;
-  const allowedTypes = limits?.allowedContentTypes ?? DEFAULT_ALLOWED_CONTENT_TYPES;
+  const rawAllowedTypes = limits?.allowedContentTypes ?? DEFAULT_ALLOWED_CONTENT_TYPES;
+  // Treat empty allowlist as "use defaults" to prevent fail-open
+  const allowedTypes = rawAllowedTypes.length > 0 ? rawAllowedTypes : DEFAULT_ALLOWED_CONTENT_TYPES;
   // Sanitize: fall back to defaults for invalid (NaN / Infinity / negative) values
   const maxSize = Number.isFinite(rawMaxSize) && rawMaxSize > 0 ? rawMaxSize : DEFAULT_MAX_SIZE_BYTES;
   const maxCount = Number.isFinite(rawMaxCount) && rawMaxCount >= 0 ? Math.floor(rawMaxCount) : DEFAULT_MAX_PER_MESSAGE;
@@ -82,7 +76,7 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
     count++;
 
     // Content-type allowlist check
-    if (allowedTypes.length > 0 && !allowedTypes.includes(attachment.contentType ?? "")) {
+    if (!allowedTypes.includes(attachment.contentType ?? "")) {
       logger.warn({
         msg: "Attachment content type not allowed",
         name: attachment.name,
