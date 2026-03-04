@@ -227,7 +227,12 @@ describe("saveAttachments", () => {
     });
 
     const msg = makeMessage([
-      { name: "stall.bin", url: "https://cdn.discord.com/stall.bin", size: 100, contentType: "application/octet-stream" },
+      {
+        name: "stall.bin",
+        url: "https://cdn.discord.com/stall.bin",
+        size: 100,
+        contentType: "application/octet-stream",
+      },
     ]);
 
     const promise = saveAttachments(msg);

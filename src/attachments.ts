@@ -38,7 +38,7 @@ export async function saveAttachments(message: Message, limits?: Partial<Attachm
   const rawMaxCount = limits?.maxPerMessage ?? DEFAULT_MAX_PER_MESSAGE;
   // Sanitize: fall back to defaults for invalid (NaN / Infinity / negative) values
   const maxSize = Number.isFinite(rawMaxSize) && rawMaxSize > 0 ? rawMaxSize : DEFAULT_MAX_SIZE_BYTES;
-  const maxCount = Number.isFinite(rawMaxCount) && rawMaxCount > 0 ? Math.floor(rawMaxCount) : DEFAULT_MAX_PER_MESSAGE;
+  const maxCount = Number.isFinite(rawMaxCount) && rawMaxCount >= 0 ? Math.floor(rawMaxCount) : DEFAULT_MAX_PER_MESSAGE;
 
   if (!existsSync(ATTACHMENTS_DIR)) {
     mkdirSync(ATTACHMENTS_DIR, { recursive: true });
