@@ -56,8 +56,6 @@ vi.mock("../src/pairing.js", () => ({
   createPairingRequest: vi.fn(),
 }));
 vi.mock("../src/friend-buttons.js", () => ({
-  cleanupExpiredButtonRequests: vi.fn(),
-  getPendingButtonRequest: vi.fn(),
   handleFriendButtonInteraction: vi.fn(),
   isFriendRequestButton: vi.fn().mockReturnValue(false),
 }));
@@ -65,6 +63,10 @@ vi.mock("../src/discord-extension.js", () => ({
   createDiscordExtension: vi.fn(() => ({
     claimOwnership: vi.fn(),
   })),
+  cleanupExpiredCallbacks: vi.fn(),
+  clearPendingCallbacks: vi.fn(),
+  getPendingCallbacks: vi.fn(),
+  removePendingCallbacks: vi.fn(),
 }));
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },

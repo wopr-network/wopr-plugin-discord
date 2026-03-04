@@ -1,12 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   isFriendRequestButton,
   parseButtonCustomId,
-  isValidEd25519Pubkey,
-  storePendingButtonRequest,
-  getPendingButtonRequest,
-  removePendingButtonRequest,
-  cleanupExpiredButtonRequests,
   handleFriendButtonInteraction,
   createFriendRequestButtons,
   createFriendRequestEmbed,
@@ -51,159 +46,8 @@ describe("parseButtonCustomId", () => {
   });
 });
 
-describe("isValidEd25519Pubkey", () => {
-  const validKey = "a".repeat(64);
-
-  it("accepts valid 64-char hex string", () => {
-    expect(isValidEd25519Pubkey(validKey)).toBe(true);
-    expect(isValidEd25519Pubkey("abcdef0123456789".repeat(4))).toBe(true);
-  });
-
-  it("rejects short strings", () => {
-    expect(isValidEd25519Pubkey("abc")).toBe(false);
-  });
-
-  it("rejects 65-char strings", () => {
-    expect(isValidEd25519Pubkey("a".repeat(65))).toBe(false);
-  });
-
-  it("rejects non-hex characters", () => {
-    expect(isValidEd25519Pubkey("g".repeat(64))).toBe(false);
-    expect(isValidEd25519Pubkey("z".repeat(64))).toBe(false);
-  });
-
-  it("rejects non-string input", () => {
-    expect(isValidEd25519Pubkey(123 as any)).toBe(false);
-    expect(isValidEd25519Pubkey(null as any)).toBe(false);
-  });
-});
-
-describe("pending button request lifecycle", () => {
-  const validPubkey = "a".repeat(64);
-  const validEncryptPub = "b".repeat(64);
-
-  afterEach(() => {
-    removePendingButtonRequest("alice");
-    removePendingButtonRequest("Bob");
-  });
-
-  describe("storePendingButtonRequest", () => {
-    it("stores a valid request and returns undefined", () => {
-      const result = storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-      expect(result).toBeUndefined();
-    });
-
-    it("returns error for invalid pubkey", () => {
-      const result = storePendingButtonRequest("alice", "bad", validEncryptPub, "ch-1", "sig-1");
-      expect(result).toBe("Invalid public key format (expected 64-char hex Ed25519 key)");
-    });
-
-    it("returns error for invalid encryptPub", () => {
-      const result = storePendingButtonRequest("alice", validPubkey, "bad", "ch-1", "sig-1");
-      expect(result).toBe("Invalid encryption public key format");
-    });
-  });
-
-  describe("getPendingButtonRequest", () => {
-    it("retrieves a stored request", () => {
-      storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-      const pending = getPendingButtonRequest("alice");
-      expect(pending).toBeDefined();
-      expect(pending!.requestFrom).toBe("alice");
-      expect(pending!.requestPubkey).toBe(validPubkey);
-      expect(pending!.encryptPub).toBe(validEncryptPub);
-      expect(pending!.channelId).toBe("ch-1");
-      expect(pending!.signature).toBe("sig-1");
-    });
-
-    it("returns undefined for unknown request", () => {
-      expect(getPendingButtonRequest("unknown")).toBeUndefined();
-    });
-
-    it("is case-insensitive", () => {
-      storePendingButtonRequest("Bob", validPubkey, validEncryptPub, "ch-1", "sig-1");
-      expect(getPendingButtonRequest("bob")).toBeDefined();
-      expect(getPendingButtonRequest("BOB")).toBeDefined();
-    });
-  });
-
-  describe("removePendingButtonRequest", () => {
-    it("removes a stored request", () => {
-      storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-      removePendingButtonRequest("alice");
-      expect(getPendingButtonRequest("alice")).toBeUndefined();
-    });
-
-    it("is case-insensitive", () => {
-      storePendingButtonRequest("Bob", validPubkey, validEncryptPub, "ch-1", "sig-1");
-      removePendingButtonRequest("bob");
-      expect(getPendingButtonRequest("Bob")).toBeUndefined();
-    });
-
-    it("does not throw for unknown key", () => {
-      expect(() => removePendingButtonRequest("nonexistent")).not.toThrow();
-    });
-  });
-});
-
-describe("cleanupExpiredButtonRequests", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-    removePendingButtonRequest("alice");
-    removePendingButtonRequest("bob");
-  });
-
-  it("removes requests older than 15 minutes", () => {
-    vi.useFakeTimers();
-    const validPubkey = "a".repeat(64);
-    const validEncryptPub = "b".repeat(64);
-
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-
-    vi.advanceTimersByTime(16 * 60 * 1000);
-
-    cleanupExpiredButtonRequests();
-    expect(getPendingButtonRequest("alice")).toBeUndefined();
-  });
-
-  it("keeps requests younger than 15 minutes", () => {
-    vi.useFakeTimers();
-    const validPubkey = "a".repeat(64);
-    const validEncryptPub = "b".repeat(64);
-
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-
-    vi.advanceTimersByTime(10 * 60 * 1000);
-
-    cleanupExpiredButtonRequests();
-    expect(getPendingButtonRequest("alice")).toBeDefined();
-  });
-
-  it("removes only expired requests, keeps fresh ones", () => {
-    vi.useFakeTimers();
-    const validPubkey = "a".repeat(64);
-    const validEncryptPub = "b".repeat(64);
-
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-
-    vi.advanceTimersByTime(14 * 60 * 1000);
-    storePendingButtonRequest("bob", validPubkey, validEncryptPub, "ch-2", "sig-2");
-
-    vi.advanceTimersByTime(2 * 60 * 1000); // alice=16min, bob=2min
-
-    cleanupExpiredButtonRequests();
-    expect(getPendingButtonRequest("alice")).toBeUndefined();
-    expect(getPendingButtonRequest("bob")).toBeDefined();
-  });
-});
-
 function createMockButtonInteraction(overrides: Record<string, any> = {}) {
   const channelId = overrides.channelId ?? "ch-1";
-  const channel = {
-    id: channelId,
-    isTextBased: () => true,
-    send: vi.fn().mockResolvedValue(undefined),
-  };
   return {
     customId: overrides.customId ?? "friend_accept:alice",
     user: { id: overrides.userId ?? "owner-123" },
@@ -217,7 +61,9 @@ function createMockButtonInteraction(overrides: Record<string, any> = {}) {
     client: {
       user: { id: "bot-id" },
       channels: {
-        cache: new Map([[channelId, channel]]),
+        cache: new Map([
+          [channelId, { id: channelId, isTextBased: () => true, send: vi.fn().mockResolvedValue(undefined) }],
+        ]),
       },
     },
     ...overrides,
@@ -225,90 +71,53 @@ function createMockButtonInteraction(overrides: Record<string, any> = {}) {
 }
 
 describe("handleFriendButtonInteraction", () => {
-  const validPubkey = "a".repeat(64);
-  const validEncryptPub = "b".repeat(64);
-
   afterEach(() => {
-    removePendingButtonRequest("alice");
+    vi.clearAllMocks();
   });
 
-  it("replies with expired message when no pending request exists", async () => {
+  it("accepts a friend request via callback", async () => {
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
     const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
-    const onAccept = vi.fn().mockResolvedValue("accepted");
+    const onAccept = vi.fn().mockResolvedValue(undefined);
     const onDeny = vi.fn();
 
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
-
-    expect(interaction.reply).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining("expired or was already handled"),
-        ephemeral: true,
-      }),
-    );
-    expect(onAccept).not.toHaveBeenCalled();
-  });
-
-  it("accepts a friend request and removes pending entry", async () => {
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-    const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
-    const onAccept = vi.fn().mockResolvedValue("Welcome alice!");
-    const onDeny = vi.fn();
-
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
 
     expect(interaction.deferUpdate).toHaveBeenCalled();
-    expect(onAccept).toHaveBeenCalledWith("alice", expect.objectContaining({ requestFrom: "alice" }));
+    expect(onAccept).toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("accepted"),
       }),
     );
-    expect(getPendingButtonRequest("alice")).toBeUndefined();
     expect(ctx.log.info).toHaveBeenCalled();
   });
 
-  it("sends accept message to the original channel", async () => {
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
-    const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
-    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
-    const onAccept = vi.fn().mockResolvedValue("Welcome alice!");
-    const onDeny = vi.fn();
-
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
-
-    const channel = interaction.client.channels.cache.get("ch-1");
-    expect(channel.send).toHaveBeenCalledWith("Welcome alice!");
-  });
-
-  it("denies a friend request and removes pending entry", async () => {
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
+  it("denies a friend request via callback", async () => {
     const interaction = createMockButtonInteraction({ customId: "friend_deny:alice" });
     const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn();
     const onDeny = vi.fn().mockResolvedValue(undefined);
 
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
 
     expect(interaction.deferUpdate).toHaveBeenCalled();
-    expect(onDeny).toHaveBeenCalledWith("alice");
+    expect(onDeny).toHaveBeenCalled();
     expect(interaction.editReply).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("denied"),
       }),
     );
-    expect(getPendingButtonRequest("alice")).toBeUndefined();
+    expect(ctx.log.info).toHaveBeenCalled();
   });
 
   it("follows up with error when onAccept throws", async () => {
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_accept:alice" });
     const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn().mockRejectedValue(new Error("network error"));
     const onDeny = vi.fn();
 
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
 
     expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -319,13 +128,12 @@ describe("handleFriendButtonInteraction", () => {
   });
 
   it("follows up with error when onDeny throws", async () => {
-    storePendingButtonRequest("alice", validPubkey, validEncryptPub, "ch-1", "sig-1");
     const interaction = createMockButtonInteraction({ customId: "friend_deny:alice" });
     const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
     const onAccept = vi.fn();
     const onDeny = vi.fn().mockRejectedValue(new Error("db error"));
 
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
 
     expect(interaction.followUp).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -341,12 +149,42 @@ describe("handleFriendButtonInteraction", () => {
     const onAccept = vi.fn();
     const onDeny = vi.fn();
 
-    await handleFriendButtonInteraction(interaction as any, ctx, "bot", onAccept, onDeny);
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
 
     expect(interaction.reply).not.toHaveBeenCalled();
     expect(interaction.deferUpdate).not.toHaveBeenCalled();
     expect(onAccept).not.toHaveBeenCalled();
     expect(onDeny).not.toHaveBeenCalled();
+  });
+
+  it("rejects button from a message not authored by this bot", async () => {
+    const interaction = createMockButtonInteraction({
+      customId: "friend_accept:alice",
+      message: { author: { id: "other-bot" }, id: "msg-1" },
+    });
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
+    const onAccept = vi.fn();
+    const onDeny = vi.fn();
+
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
+
+    expect(interaction.reply).toHaveBeenCalledWith({ content: "Unauthorized", ephemeral: true });
+    expect(onAccept).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-owner user", async () => {
+    const interaction = createMockButtonInteraction({
+      customId: "friend_accept:alice",
+      userId: "stranger-456",
+    });
+    const ctx = createMockContext({ getConfig: vi.fn(() => ({ ownerUserId: "owner-123" })) });
+    const onAccept = vi.fn();
+    const onDeny = vi.fn();
+
+    await handleFriendButtonInteraction(interaction as any, ctx, onAccept, onDeny);
+
+    expect(interaction.reply).toHaveBeenCalledWith({ content: "Unauthorized", ephemeral: true });
+    expect(onAccept).not.toHaveBeenCalled();
   });
 });
 

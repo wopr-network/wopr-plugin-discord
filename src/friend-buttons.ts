@@ -120,7 +120,7 @@ function verifyOwnerUser(interaction: ButtonInteraction, ctx: WOPRPluginContext)
 export async function handleFriendButtonInteraction(
   interaction: ButtonInteraction,
   ctx: WOPRPluginContext,
-  onAccept: () => Promise<string>,
+  onAccept: () => Promise<void>,
   onDeny: () => Promise<void>,
 ): Promise<void> {
   const parsed = parseButtonCustomId(interaction.customId);

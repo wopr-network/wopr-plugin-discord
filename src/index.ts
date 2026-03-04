@@ -14,6 +14,7 @@ import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient 
 import { ChannelQueueManager } from "./channel-queue.js";
 import {
   cleanupExpiredCallbacks,
+  clearPendingCallbacks,
   createDiscordExtension,
   getPendingCallbacks,
   removePendingCallbacks,
@@ -268,6 +269,8 @@ const plugin: WOPRPlugin = {
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
+    // Clear any stale callbacks left over from a previous plugin run.
+    clearPendingCallbacks();
 
     // Register setup context provider for conversational setup
     if (ctx.registerSetupContextProvider) {
@@ -408,19 +411,15 @@ const plugin: WOPRPlugin = {
           return;
         }
 
+        // Remove immediately to prevent double-processing on rapid clicks.
+        removePendingCallbacks(msgId);
+
         await handleFriendButtonInteraction(
           interaction,
           // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before this event handler fires
           ctx!,
-          async () => {
-            const result = await callbacks.onAccept();
-            removePendingCallbacks(msgId);
-            return result;
-          },
-          async () => {
-            await callbacks.onDeny();
-            removePendingCallbacks(msgId);
-          },
+          () => callbacks.onAccept(),
+          () => callbacks.onDeny(),
         ).catch((e) => logger.error({ msg: "Button interaction error", error: String(e) }));
         return;
       }
@@ -461,6 +460,8 @@ const plugin: WOPRPlugin = {
     }
   },
   async shutdown() {
+    clearPendingCallbacks();
+
     for (const cleanup of cleanups) {
       try {
         cleanup();
