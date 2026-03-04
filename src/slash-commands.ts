@@ -535,7 +535,7 @@ export class SlashCommandHandler {
         } catch (e) {
           logger.error({ msg: "Failed to switch model", error: String(e) });
           await interaction.reply({
-            content: `\u274c Failed to switch model: ${e}`,
+            content: "\u274c Failed to switch model. Please try again later.",
             ephemeral: true,
           });
         }
@@ -596,7 +596,10 @@ export class SlashCommandHandler {
           } catch (err) {
             logger.error({ msg: "Channel command handler error", command: commandName, error: String(err) });
             if (!replied) {
-              await interaction.reply({ content: `Error: ${err}`, ephemeral: true });
+              await interaction.reply({
+                content: "An internal error occurred. Please try again later.",
+                ephemeral: true,
+              });
             }
           }
         } else {
