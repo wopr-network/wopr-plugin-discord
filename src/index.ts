@@ -12,7 +12,13 @@ import { join } from "node:path";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
-import { createDiscordExtension } from "./discord-extension.js";
+import {
+  cleanupExpiredCallbacks,
+  clearPendingCallbacks,
+  createDiscordExtension,
+  getPendingCallbacks,
+  removePendingCallbacks,
+} from "./discord-extension.js";
 import {
   executeInjectInternal,
   handleMessage,
@@ -21,12 +27,7 @@ import {
   subscribeSessionEvents,
   subscribeStreamEvents,
 } from "./event-handlers.js";
-import {
-  cleanupExpiredButtonRequests,
-  getPendingButtonRequest,
-  handleFriendButtonInteraction,
-  isFriendRequestButton,
-} from "./friend-buttons.js";
+import { handleFriendButtonInteraction, isFriendRequestButton } from "./friend-buttons.js";
 import { refreshIdentity } from "./identity-manager.js";
 import { logger } from "./logger.js";
 import { cleanupExpiredPairings, hasOwner } from "./pairing.js";
@@ -268,6 +269,8 @@ const plugin: WOPRPlugin = {
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
+    // Clear any stale callbacks left over from a previous plugin run.
+    clearPendingCallbacks();
 
     // Register setup context provider for conversational setup
     if (ctx.registerSetupContextProvider) {
@@ -397,55 +400,26 @@ const plugin: WOPRPlugin = {
       }
 
       if (interaction.isButton() && isFriendRequestButton(interaction.customId)) {
-        const p2pExt = ctx?.getExtension?.("p2p") as
-          | {
-              acceptFriendRequest?: (
-                from: string,
-                pubkey: string,
-                encryptPub: string,
-                signature: string,
-                channelId: string,
-              ) => Promise<{ friend: { name: string }; acceptMessage: string }>;
-              denyFriendRequest?: (from: string, signature: string) => Promise<void>;
-            }
-          | undefined;
+        const msgId = interaction.message?.id;
+        const callbacks = msgId ? getPendingCallbacks(msgId) : undefined;
+
+        if (!callbacks || !msgId) {
+          await interaction.reply({
+            content: "This friend request has expired or was already handled.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        // Remove immediately to prevent double-processing on rapid clicks.
+        removePendingCallbacks(msgId);
 
         await handleFriendButtonInteraction(
           interaction,
           // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before this event handler fires
           ctx!,
-          client?.user?.username || "unknown",
-          async (from: string, pending) => {
-            if (p2pExt?.acceptFriendRequest) {
-              const result = await p2pExt.acceptFriendRequest(
-                from,
-                pending.requestPubkey,
-                pending.encryptPub,
-                pending.signature,
-                pending.channelId,
-              );
-              logger.info({
-                msg: "Friend request accepted via button",
-                from,
-                friend: result.friend.name,
-              });
-              return result.acceptMessage;
-            } else {
-              logger.warn({ msg: "P2P extension not available - cannot complete friendship" });
-              return `Accepted friend request from @${from} (but P2P extension not available)`;
-            }
-          },
-          async (from: string) => {
-            if (p2pExt?.denyFriendRequest) {
-              const pending = getPendingButtonRequest(from);
-              if (pending?.signature) {
-                await p2pExt.denyFriendRequest(from, pending.signature);
-              } else {
-                logger.warn({ msg: "No signature found for deny - skipping P2P deny call", from });
-              }
-            }
-            logger.info({ msg: "Friend request denied via button", from });
-          },
+          () => callbacks.onAccept(),
+          () => callbacks.onDeny(),
         ).catch((e) => logger.error({ msg: "Button interaction error", error: String(e) }));
         return;
       }
@@ -458,7 +432,7 @@ const plugin: WOPRPlugin = {
     // 10. Start processors
     queueManager.startProcessing(() => {
       cleanupExpiredPairings();
-      cleanupExpiredButtonRequests();
+      cleanupExpiredCallbacks();
     });
 
     client.on(Events.ClientReady, async () => {
@@ -486,6 +460,8 @@ const plugin: WOPRPlugin = {
     }
   },
   async shutdown() {
+    clearPendingCallbacks();
+
     for (const cleanup of cleanups) {
       try {
         cleanup();

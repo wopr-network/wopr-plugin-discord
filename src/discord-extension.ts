@@ -6,16 +6,60 @@
  */
 
 import { ChannelType, type Client } from "discord.js";
-import {
-  createFriendRequestButtons,
-  createFriendRequestEmbed,
-  getOwnerUserId,
-  setMessageIdOnPendingButtonRequest,
-  storePendingButtonRequest,
-} from "./friend-buttons.js";
+import { createFriendRequestButtons, createFriendRequestEmbed, getOwnerUserId } from "./friend-buttons.js";
 import { logger } from "./logger.js";
 import { claimPairingCode, hasOwner, setOwner } from "./pairing.js";
 import type { WOPRPluginContext } from "./types.js";
+
+// Callback map: Discord message ID → { onAccept, onDeny, requestFrom, timestamp }
+const CALLBACK_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+type P2PExtension = {
+  acceptFriendRequest?: (
+    from: string,
+    pubkey: string,
+    encryptPub: string,
+    signature: string,
+    channelId: string,
+  ) => Promise<{ friend: { name: string }; acceptMessage: string }>;
+  denyFriendRequest?: (from: string, signature: string) => Promise<void>;
+};
+
+/** Basic sanity check: non-empty, 32–128 chars, only alphanumeric/base64/base58 chars */
+function isValidEd25519Pubkey(key: string): boolean {
+  if (!key || key.length < 32 || key.length > 128) return false;
+  return /^[A-Za-z0-9+/=_-]+$/.test(key);
+}
+
+export interface PendingNotificationCallbacks {
+  onAccept: () => Promise<void>;
+  onDeny: () => Promise<void>;
+  requestFrom: string;
+  timestamp: number;
+}
+
+const pendingCallbacks: Map<string, PendingNotificationCallbacks> = new Map();
+
+export function getPendingCallbacks(messageId: string): PendingNotificationCallbacks | undefined {
+  return pendingCallbacks.get(messageId);
+}
+
+export function removePendingCallbacks(messageId: string): void {
+  pendingCallbacks.delete(messageId);
+}
+
+export function clearPendingCallbacks(): void {
+  pendingCallbacks.clear();
+}
+
+export function cleanupExpiredCallbacks(): void {
+  const now = Date.now();
+  for (const [key, entry] of pendingCallbacks) {
+    if (now - entry.timestamp > CALLBACK_TTL_MS) {
+      pendingCallbacks.delete(key);
+    }
+  }
+}
 
 // ============================================================================
 // Structured return types for WebMCP-facing extension methods
@@ -49,8 +93,8 @@ export interface MessageStatsInfo {
 }
 
 async function sendFriendRequestNotification(
-  ctx: WOPRPluginContext,
-  client: Client,
+  getCtx: () => WOPRPluginContext | null,
+  getClient: () => Client | null,
   requestFrom: string,
   pubkey: string,
   encryptPub: string,
@@ -58,9 +102,18 @@ async function sendFriendRequestNotification(
   channelName: string,
   signature: string,
 ): Promise<boolean> {
+  const ctx = getCtx();
+  const client = getClient();
+  if (!ctx || !client) return false;
+
   const config = ctx.getConfig<{ ownerUserId?: string }>();
   if (!config.ownerUserId) {
     logger.warn({ msg: "No ownerUserId configured - friend request notification not sent" });
+    return false;
+  }
+
+  if (!isValidEd25519Pubkey(pubkey) || !isValidEd25519Pubkey(encryptPub)) {
+    logger.warn({ msg: "Invalid pubkey or encryptPub in friend request - notification not sent", requestFrom });
     return false;
   }
 
@@ -68,12 +121,6 @@ async function sendFriendRequestNotification(
     const owner = await client.users.fetch(config.ownerUserId);
     if (!owner) {
       logger.warn({ msg: "Could not fetch owner user", ownerUserId: config.ownerUserId });
-      return false;
-    }
-
-    const validationError = storePendingButtonRequest(requestFrom, pubkey, encryptPub, channelId, signature);
-    if (validationError) {
-      logger.warn({ msg: "Friend request rejected: invalid keys", requestFrom, error: validationError });
       return false;
     }
 
@@ -86,7 +133,37 @@ async function sendFriendRequestNotification(
       components: [buttons],
     });
 
-    setMessageIdOnPendingButtonRequest(requestFrom, sentMessage.id);
+    // Store callbacks keyed by Discord message ID.
+    // P2P extension is resolved fresh at click time so hot-reloads are handled correctly.
+    pendingCallbacks.set(sentMessage.id, {
+      requestFrom,
+      timestamp: Date.now(),
+      onAccept: async () => {
+        const currentCtx = getCtx();
+        const currentClient = getClient();
+        const p2pExt = currentCtx?.getExtension?.("p2p") as P2PExtension | undefined;
+        if (!p2pExt?.acceptFriendRequest) {
+          throw new Error("P2P extension not available");
+        }
+        const result = await p2pExt.acceptFriendRequest(requestFrom, pubkey, encryptPub, signature, channelId);
+        try {
+          const channel = currentClient?.channels.cache.get(channelId);
+          if (channel?.isTextBased() && "send" in channel) {
+            await channel.send(result.acceptMessage);
+          }
+        } catch (e) {
+          logger.warn({ msg: "Failed to send accept message to channel", error: String(e) });
+        }
+      },
+      onDeny: async () => {
+        const currentCtx = getCtx();
+        const p2pExt = currentCtx?.getExtension?.("p2p") as P2PExtension | undefined;
+        if (!p2pExt?.denyFriendRequest) {
+          throw new Error("P2P extension not available");
+        }
+        await p2pExt.denyFriendRequest(requestFrom, signature);
+      },
+    });
 
     logger.info({ msg: "Friend request notification sent to owner", requestFrom, ownerUserId: config.ownerUserId });
     return true;
@@ -126,7 +203,7 @@ export function createDiscordExtension(
   getCtx: () => WOPRPluginContext | null,
 ): DiscordExtension {
   return {
-    sendFriendRequestNotification: async (
+    sendFriendRequestNotification: (
       requestFrom: string,
       pubkey: string,
       encryptPub: string,
@@ -134,12 +211,9 @@ export function createDiscordExtension(
       channelName: string,
       signature: string,
     ): Promise<boolean> => {
-      const currentCtx = getCtx();
-      const currentClient = getClient();
-      if (!currentCtx || !currentClient) return false;
       return sendFriendRequestNotification(
-        currentCtx,
-        currentClient,
+        getCtx,
+        getClient,
         requestFrom,
         pubkey,
         encryptPub,
