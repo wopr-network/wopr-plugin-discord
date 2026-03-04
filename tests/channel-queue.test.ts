@@ -581,14 +581,23 @@ describe("Channel Queue System", () => {
   describe("Promise chain ordering", () => {
     it("should process human messages sequentially in order", async () => {
       const injectOrder: string[] = [];
-      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay: 30 });
+      let inFlight = 0;
+      const injectDelay = 30;
+      const { handleMessage, ctx, shutdown } = await setupPlugin({ injectDelay });
 
       let callCount = 0;
       (ctx.inject as ReturnType<typeof vi.fn>).mockImplementation(async (_s: string, msg: string) => {
+        // Assert non-overlapping: no other inject should be running concurrently
+        expect(inFlight).toBe(0);
+        inFlight++;
         callCount++;
         injectOrder.push(msg);
-        await new Promise((r) => setTimeout(r, 30));
-        return `Response ${callCount}`;
+        try {
+          await new Promise((r) => setTimeout(r, injectDelay));
+          return `Response ${callCount}`;
+        } finally {
+          inFlight--;
+        }
       });
 
       const channelId = "ch-order-test";
@@ -596,13 +605,18 @@ describe("Channel Queue System", () => {
       const msg2 = createHumanMessage(channelId, "Second message");
       const msg3 = createHumanMessage(channelId, "Third message");
 
-      // Send three messages to the same channel concurrently so they all enter the queue simultaneously
-      await Promise.all([handleMessage(msg1), handleMessage(msg2), handleMessage(msg3)]);
+      // Dispatch all three without awaiting between calls so the queue is under
+      // concurrency pressure — this is what actually exercises FIFO enforcement
+      const p1 = handleMessage(msg1);
+      const p2 = handleMessage(msg2);
+      const p3 = handleMessage(msg3);
 
-      // Advance timers enough for all 3 messages to process sequentially (injectDelay=30 + mock delay=30, × 3 messages)
-      await vi.advanceTimersByTimeAsync(3 * 60);
+      // Advance enough time for all 3 messages to process sequentially, derived
+      // from injectDelay so the test stays accurate if the delay changes
+      await vi.advanceTimersByTimeAsync(injectDelay * 4);
+      await Promise.all([p1, p2, p3]);
 
-      // Verify all three were injected in FIFO order
+      // Verify all three were injected in FIFO order with no overlap
       expect(injectOrder.length).toBe(3);
       expect(injectOrder[0]).toContain("First message");
       expect(injectOrder[1]).toContain("Second message");
