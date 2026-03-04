@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createMockContext } from "./mocks/wopr-context.js";
 import { createMockClient } from "./mocks/discord-client.js";
 
-const mockClient = createMockClient();
+let mockClient = createMockClient();
 
 vi.mock("discord.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("discord.js")>();
@@ -81,13 +81,14 @@ import { subscribeSessionEvents, subscribeStreamEvents } from "../src/event-hand
 
 describe("plugin lifecycle", () => {
   beforeEach(async () => {
+    mockClient = createMockClient();
     const { Client } = await import("discord.js");
     vi.mocked(Client as any).mockImplementation(function () { return mockClient; });
   });
 
   afterEach(async () => {
     await plugin.shutdown();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("exports init and shutdown functions", () => {
