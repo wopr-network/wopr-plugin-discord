@@ -18,6 +18,8 @@ function mockInteraction(userId: string, customId: string) {
   return {
     user: { id: userId },
     customId,
+    replied: false,
+    deferred: false,
     reply,
     deferUpdate,
     editReply,
@@ -33,7 +35,7 @@ describe("handleFriendButtonInteraction owner authorization", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Store a pending request so the "expired" check doesn't fire
-    storePendingButtonRequest("alice", "a".repeat(64), "b".repeat(64), "chan-1", "sig-1");
+    expect(storePendingButtonRequest("alice", "a".repeat(64), "b".repeat(64), "chan-1", "sig-1")).toBeUndefined();
   });
 
   it("rejects non-owner with ephemeral Unauthorized", async () => {
@@ -79,7 +81,7 @@ describe("handleFriendButtonInteraction owner authorization", () => {
     const interaction = mockInteraction("owner-123", "friend_deny:alice");
 
     // Re-store since previous test may have consumed it
-    storePendingButtonRequest("alice", "a".repeat(64), "b".repeat(64), "chan-1", "sig-1");
+    expect(storePendingButtonRequest("alice", "a".repeat(64), "b".repeat(64), "chan-1", "sig-1")).toBeUndefined();
 
     await handleFriendButtonInteraction(interaction, ctx, "bot", onAccept, onDeny);
 

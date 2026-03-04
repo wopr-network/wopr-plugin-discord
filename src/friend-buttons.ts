@@ -171,7 +171,11 @@ export async function handleFriendButtonInteraction(
   // Verify the clicking user is the bot owner
   const ownerId = getOwnerUserId(ctx);
   if (!ownerId || interaction.user.id !== ownerId) {
-    await interaction.reply({ content: "Unauthorized", ephemeral: true });
+    const replyFn =
+      interaction.replied || interaction.deferred
+        ? interaction.followUp.bind(interaction)
+        : interaction.reply.bind(interaction);
+    await replyFn({ content: "Unauthorized", ephemeral: true });
     return;
   }
 
