@@ -70,7 +70,7 @@ const configSchema: ConfigSchema = {
       type: "text",
       label: "Owner User ID (optional)",
       placeholder: "Your Discord user ID",
-      description: "Receive private notifications for friend requests",
+      description: "Discord user ID that owns this bot (used for /claim command)",
     },
     {
       name: "emojiQueued",

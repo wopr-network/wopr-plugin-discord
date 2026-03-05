@@ -143,7 +143,6 @@ The following values are managed by the plugin automatically:
 
 | Key | Description |
 |-----|-------------|
-| `pairingRequests` | Pending owner pairing requests (internal) |
 | `mappings` | Channel/session mappings (internal) |
 
 Do not modify these values manually.
