@@ -417,8 +417,6 @@ export function subscribeSessionEvents(ctx: WOPRPluginContext, client: Client): 
       sourceLabel = "Cron";
     } else if (payload.from === "cli") {
       sourceLabel = "CLI";
-    } else if (payload.from?.startsWith("p2p:")) {
-      sourceLabel = "P2P";
     } else if (payload.from?.startsWith("discord:")) {
       sourceLabel = `Session: ${payload.from}`;
     }
