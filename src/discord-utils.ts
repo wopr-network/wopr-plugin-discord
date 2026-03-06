@@ -6,39 +6,29 @@
 import { type ChatInputCommandInteraction, DMChannel, type Message, TextChannel, ThreadChannel } from "discord.js";
 
 /**
- * Sanitize a name for use in session keys (lowercase, replace spaces with -).
- */
-function sanitize(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9_-]/g, "");
-}
-
-/**
- * Generate a readable session key from a Discord channel.
+ * Generate a unique session key from a Discord channel using immutable IDs.
  * Format:
- * - Guild channels: discord:guildName:#channelName
- * - Threads: discord:guildName:#parentChannel/threadName
- * - DMs: discord:dm:username
+ * - Guild channels: discord:guildId:#channelId
+ * - Threads: discord:guildId:#parentId/threadId
+ * - DMs: discord:dm:userId
  */
 export function getSessionKey(channel: TextChannel | ThreadChannel | DMChannel): string {
   if (channel.isDMBased()) {
     const dm = channel as DMChannel;
-    const recipientName = dm.recipient?.username || "unknown";
-    return `discord:dm:${sanitize(recipientName)}`;
+    const recipientId = dm.recipient?.id || "unknown";
+    return `discord:dm:${recipientId}`;
   }
 
   if (channel.isThread()) {
     const thread = channel as ThreadChannel;
-    const guildName = thread.guild?.name || "unknown";
-    const parentName = thread.parent?.name || "unknown";
-    return `discord:${sanitize(guildName)}:#${sanitize(parentName)}/${sanitize(thread.name)}`;
+    const guildId = thread.guild?.id || "unknown";
+    const parentId = thread.parentId || "unknown";
+    return `discord:${guildId}:#${parentId}/${thread.id}`;
   }
 
   const textChannel = channel as TextChannel;
-  const guildName = textChannel.guild?.name || "unknown";
-  return `discord:${sanitize(guildName)}:#${sanitize(textChannel.name)}`;
+  const guildId = textChannel.guild?.id || "unknown";
+  return `discord:${guildId}:#${textChannel.id}`;
 }
 
 /**
