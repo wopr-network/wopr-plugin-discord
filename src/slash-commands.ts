@@ -434,9 +434,7 @@ export class SlashCommandHandler {
 
         if (result.success) {
           await interaction.reply({
-            content:
-              `\u2705 **Ownership claimed!**\n\n` +
-              `You will receive private notifications for friend requests and other owner-only features.`,
+            content: `\u2705 **Ownership claimed!**\n\n` + `You now have access to owner-only features.`,
             ephemeral: true,
           });
           logger.info({ msg: "Bot ownership claimed" });

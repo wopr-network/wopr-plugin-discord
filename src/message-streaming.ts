@@ -579,7 +579,7 @@ export class DiscordMessageStream {
 // Key: Discord message ID that triggered the inject
 export const streams = new Map<string, DiscordMessageStream>();
 
-// Event bus streams - for non-Discord-originated injects (cron, sessions_send, P2P, CLI)
+// Event bus streams - for non-Discord-originated injects (cron, sessions_send, CLI)
 // Key: session name (e.g., "discord:misfits:#wopr-devops")
 export const eventBusStreams = new Map<string, DiscordMessageStream>();
 

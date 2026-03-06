@@ -21,7 +21,7 @@ export function setChannelProviderClient(c: Client | null): void {
   discordClient = c;
 }
 
-// Registered commands and parsers from other plugins (e.g., P2P friend commands)
+// Registered commands and parsers from other plugins
 const registeredCommands: Map<string, ChannelCommand> = new Map();
 
 export function getRegisteredCommand(name: string): ChannelCommand | undefined {

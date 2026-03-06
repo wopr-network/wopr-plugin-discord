@@ -13,13 +13,7 @@ import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { DEFAULT_ALLOWED_CONTENT_TYPES, DEFAULT_MAX_PER_MESSAGE, DEFAULT_MAX_SIZE_BYTES } from "./attachments.js";
 import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
-import {
-  cleanupExpiredCallbacks,
-  clearPendingCallbacks,
-  createDiscordExtension,
-  getPendingCallbacks,
-  removePendingCallbacks,
-} from "./discord-extension.js";
+import { createDiscordExtension } from "./discord-extension.js";
 import {
   executeInjectInternal,
   handleMessage,
@@ -28,7 +22,6 @@ import {
   subscribeSessionEvents,
   subscribeStreamEvents,
 } from "./event-handlers.js";
-import { handleFriendButtonInteraction, isFriendRequestButton } from "./friend-buttons.js";
 import { refreshIdentity } from "./identity-manager.js";
 import { logger } from "./logger.js";
 import { cleanupExpiredPairings, hasOwner } from "./pairing.js";
@@ -77,7 +70,7 @@ const configSchema: ConfigSchema = {
       type: "text",
       label: "Owner User ID (optional)",
       placeholder: "Your Discord user ID",
-      description: "Receive private notifications for friend requests",
+      description: "Discord user ID that owns this bot (used for /claim command)",
     },
     {
       name: "emojiQueued",
@@ -148,7 +141,6 @@ const configSchema: ConfigSchema = {
       description:
         "Comma-separated list of allowed MIME types for attachments (e.g. image/jpeg,image/png,text/plain,application/pdf)",
     },
-    { name: "pairingRequests", type: "object", label: "Pairing Requests", hidden: true, default: {} },
     { name: "mappings", type: "object", label: "Channel Mappings", hidden: true, default: {} },
   ],
 };
@@ -290,9 +282,6 @@ const plugin: WOPRPlugin = {
   async init(context: WOPRPluginContext) {
     ctx = context;
     ctx.registerConfigSchema("wopr-plugin-discord", configSchema);
-    // Clear any stale callbacks left over from a previous plugin run.
-    clearPendingCallbacks();
-
     // Register setup context provider for conversational setup
     if (ctx.registerSetupContextProvider) {
       ctx.registerSetupContextProvider(({ partialConfig }) => {
@@ -419,31 +408,6 @@ const plugin: WOPRPlugin = {
         await slashHandler.handle(interaction).catch((e) => logger.error({ msg: "Command error", error: String(e) }));
         return;
       }
-
-      if (interaction.isButton() && isFriendRequestButton(interaction.customId)) {
-        const msgId = interaction.message?.id;
-        const callbacks = msgId ? getPendingCallbacks(msgId) : undefined;
-
-        if (!callbacks || !msgId) {
-          await interaction.reply({
-            content: "This friend request has expired or was already handled.",
-            ephemeral: true,
-          });
-          return;
-        }
-
-        // Remove immediately to prevent double-processing on rapid clicks.
-        removePendingCallbacks(msgId);
-
-        await handleFriendButtonInteraction(
-          interaction,
-          // biome-ignore lint/style/noNonNullAssertion: ctx is initialized before this event handler fires
-          ctx!,
-          () => callbacks.onAccept(),
-          () => callbacks.onDeny(),
-        ).catch((e) => logger.error({ msg: "Button interaction error", error: String(e) }));
-        return;
-      }
     });
 
     client.on(Events.TypingStart, (typing) => {
@@ -453,7 +417,6 @@ const plugin: WOPRPlugin = {
     // 10. Start processors
     queueManager.startProcessing(() => {
       cleanupExpiredPairings();
-      cleanupExpiredCallbacks();
     });
 
     client.on(Events.ClientReady, async () => {
@@ -481,8 +444,6 @@ const plugin: WOPRPlugin = {
     }
   },
   async shutdown() {
-    clearPendingCallbacks();
-
     for (const cleanup of cleanups) {
       try {
         cleanup();
