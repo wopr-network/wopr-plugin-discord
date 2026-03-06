@@ -213,11 +213,6 @@ Claim ownership of this bot using a pairing code. Only works in DMs.
 ```
 Ownership claimed!
 
-You are now the owner of this bot.
-
-User ID: 123456789012345678
-Username: alice
-
 You now have access to owner-only features.
 ```
 
