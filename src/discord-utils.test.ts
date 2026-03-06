@@ -3,30 +3,43 @@ import { describe, expect, it, vi } from "vitest";
 import { getSessionKey, getSessionKeyFromInteraction, resolveMentions } from "./discord-utils.js";
 
 // Helper: create a mock TextChannel (guild-based, not thread, not DM)
-function mockTextChannel(overrides: { name?: string; guildName?: string } = {}) {
+function mockTextChannel(overrides: { id?: string; guildId?: string; name?: string; guildName?: string } = {}) {
   return {
+    id: overrides.id ?? "channel-001",
     name: overrides.name ?? "general",
-    guild: { name: overrides.guildName ?? "Test Guild" },
+    guild: { id: overrides.guildId ?? "guild-001", name: overrides.guildName ?? "Test Guild" },
     isDMBased: () => false,
     isThread: () => false,
   } as any;
 }
 
 // Helper: create a mock DMChannel
-function mockDMChannel(overrides: { recipientUsername?: string | null } = {}) {
+function mockDMChannel(overrides: { recipientId?: string | null; recipientUsername?: string | null } = {}) {
+  const id = overrides.recipientId;
   const username = overrides.recipientUsername;
   return {
-    recipient: username === null ? null : { username: username ?? "someuser" },
+    recipient: id === null ? null : { id: id ?? "user-001", username: username ?? "someuser" },
     isDMBased: () => true,
     isThread: () => false,
   } as any;
 }
 
 // Helper: create a mock ThreadChannel
-function mockThreadChannel(overrides: { name?: string; parentName?: string | null; guildName?: string } = {}) {
+function mockThreadChannel(
+  overrides: {
+    id?: string;
+    parentId?: string | null;
+    guildId?: string;
+    name?: string;
+    parentName?: string | null;
+    guildName?: string;
+  } = {},
+) {
   return {
+    id: overrides.id ?? "thread-001",
     name: overrides.name ?? "my-thread",
-    guild: { name: overrides.guildName ?? "Test Guild" },
+    guild: { id: overrides.guildId ?? "guild-001", name: overrides.guildName ?? "Test Guild" },
+    parentId: overrides.parentId === null ? null : (overrides.parentId ?? "channel-001"),
     parent: overrides.parentName === null ? null : { name: overrides.parentName ?? "general" },
     isDMBased: () => false,
     isThread: () => true,
@@ -36,82 +49,55 @@ function mockThreadChannel(overrides: { name?: string; parentName?: string | nul
 describe("discord-utils", () => {
   describe("getSessionKey", () => {
     describe("guild TextChannel", () => {
-      it("returns discord:guildname:#channelname for a basic guild channel", () => {
-        const channel = mockTextChannel({ name: "general", guildName: "My Server" });
-        expect(getSessionKey(channel)).toBe("discord:my-server:#general");
-      });
-
-      it("sanitizes spaces to hyphens", () => {
-        const channel = mockTextChannel({ name: "my channel", guildName: "Cool Server" });
-        expect(getSessionKey(channel)).toBe("discord:cool-server:#my-channel");
-      });
-
-      it("removes special characters", () => {
-        const channel = mockTextChannel({ name: "chat!@#$%", guildName: "Server (Test)" });
-        expect(getSessionKey(channel)).toBe("discord:server-test:#chat");
-      });
-
-      it("lowercases everything", () => {
-        const channel = mockTextChannel({ name: "GENERAL", guildName: "BIG SERVER" });
-        expect(getSessionKey(channel)).toBe("discord:big-server:#general");
+      it("returns discord:guildId:#channelId for a basic guild channel", () => {
+        const channel = mockTextChannel({ id: "ch-100", guildId: "g-200" });
+        expect(getSessionKey(channel)).toBe("discord:g-200:#ch-100");
       });
 
       it("uses unknown when guild is null", () => {
         const channel = {
-          name: "general",
+          id: "ch-100",
           guild: null as any,
           isDMBased: () => false,
           isThread: () => false,
         } as any;
-        expect(getSessionKey(channel)).toBe("discord:unknown:#general");
+        expect(getSessionKey(channel)).toBe("discord:unknown:#ch-100");
+      });
+
+      it("produces different keys for same-named channels in different guilds", () => {
+        const ch1 = mockTextChannel({ id: "ch-100", guildId: "g-aaa", name: "general", guildName: "My Server" });
+        const ch2 = mockTextChannel({ id: "ch-100", guildId: "g-bbb", name: "general", guildName: "My Server" });
+        expect(getSessionKey(ch1)).not.toBe(getSessionKey(ch2));
       });
     });
 
     describe("DMChannel", () => {
-      it("returns discord:dm:username for a DM", () => {
-        const channel = mockDMChannel({ recipientUsername: "alice" });
-        expect(getSessionKey(channel)).toBe("discord:dm:alice");
+      it("returns discord:dm:userId for a DM", () => {
+        const channel = mockDMChannel({ recipientId: "user-alice" });
+        expect(getSessionKey(channel)).toBe("discord:dm:user-alice");
       });
 
       it("returns discord:dm:unknown when recipient is null", () => {
-        const channel = mockDMChannel({ recipientUsername: null });
+        const channel = mockDMChannel({ recipientId: null });
         expect(getSessionKey(channel)).toBe("discord:dm:unknown");
-      });
-
-      it("sanitizes username with spaces and special chars", () => {
-        const channel = mockDMChannel({ recipientUsername: "Some User!!" });
-        expect(getSessionKey(channel)).toBe("discord:dm:some-user");
       });
     });
 
     describe("ThreadChannel", () => {
-      it("returns discord:guild:#parent/thread format", () => {
-        const channel = mockThreadChannel({
-          name: "my-thread",
-          parentName: "general",
-          guildName: "Server",
-        });
-        expect(getSessionKey(channel)).toBe("discord:server:#general/my-thread");
+      it("returns discord:guildId:#parentId/threadId format", () => {
+        const channel = mockThreadChannel({ id: "t-300", parentId: "ch-100", guildId: "g-200" });
+        expect(getSessionKey(channel)).toBe("discord:g-200:#ch-100/t-300");
       });
 
-      it("uses unknown for null parent", () => {
-        const channel = mockThreadChannel({ name: "orphan", parentName: null, guildName: "Server" });
-        expect(getSessionKey(channel)).toBe("discord:server:#unknown/orphan");
-      });
-
-      it("sanitizes thread and parent names", () => {
-        const channel = mockThreadChannel({
-          name: "My Thread!",
-          parentName: "Cool Channel",
-          guildName: "Test",
-        });
-        expect(getSessionKey(channel)).toBe("discord:test:#cool-channel/my-thread");
+      it("uses unknown for null parentId", () => {
+        const channel = mockThreadChannel({ id: "t-300", parentId: null, guildId: "g-200" });
+        expect(getSessionKey(channel)).toBe("discord:g-200:#unknown/t-300");
       });
     });
 
     describe("consistency", () => {
       it("returns the same key for the same channel", () => {
-        const channel = mockTextChannel({ name: "dev", guildName: "WOPR" });
+        const channel = mockTextChannel({ id: "ch-dev", guildId: "g-wopr" });
         const key1 = getSessionKey(channel);
         const key2 = getSessionKey(channel);
         expect(key1).toBe(key2);
@@ -138,39 +124,41 @@ describe("discord-utils", () => {
     });
 
     it("uses getSessionKey when channel is instanceof TextChannel", () => {
-      // Create an object whose prototype chain includes TextChannel so instanceof passes
       const channel = Object.assign(Object.create(TextChannel.prototype), {
+        id: "ch-789",
         name: "general",
-        guild: { name: "Test Guild" },
+        guild: { id: "g-100", name: "Test Guild" },
         isDMBased: () => false,
         isThread: () => false,
       });
       const interaction = { channel, channelId: "ch-789" } as any;
-      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:test-guild:#general");
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:g-100:#ch-789");
     });
 
     it("uses getSessionKey when channel is instanceof ThreadChannel", () => {
       const channel = Object.create(ThreadChannel.prototype);
       Object.defineProperties(channel, {
+        id: { value: "t-790", writable: true, configurable: true },
         name: { value: "my-thread", writable: true, configurable: true },
-        guild: { value: { name: "Test Guild" }, writable: true, configurable: true },
+        guild: { value: { id: "g-100", name: "Test Guild" }, writable: true, configurable: true },
+        parentId: { value: "ch-100", writable: true, configurable: true },
         parent: { value: { name: "general" }, writable: true, configurable: true },
         isDMBased: { value: () => false, writable: true, configurable: true },
         isThread: { value: () => true, writable: true, configurable: true },
       });
       const interaction = { channel, channelId: "ch-790" } as any;
-      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:test-guild:#general/my-thread");
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:g-100:#ch-100/t-790");
     });
 
     it("uses getSessionKey when channel is instanceof DMChannel", () => {
       const channel = Object.create(DMChannel.prototype);
       Object.defineProperties(channel, {
-        recipient: { value: { username: "alice" }, writable: true, configurable: true },
+        recipient: { value: { id: "user-alice", username: "alice" }, writable: true, configurable: true },
         isDMBased: { value: () => true, writable: true, configurable: true },
         isThread: { value: () => false, writable: true, configurable: true },
       });
       const interaction = { channel, channelId: "ch-791" } as any;
-      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:dm:alice");
+      expect(getSessionKeyFromInteraction(interaction)).toBe("discord:dm:user-alice");
     });
   });
 
