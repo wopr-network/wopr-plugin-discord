@@ -27,6 +27,7 @@ vi.mock("../src/channel-provider.js", () => ({
   discordChannelProvider: {},
   getRegisteredCommand: vi.fn(),
   setChannelProviderClient: vi.fn(),
+  setCommandAuthConfig: vi.fn(),
 }));
 vi.mock("../src/reaction-manager.js", () => ({
   setReactionClient: vi.fn(),
