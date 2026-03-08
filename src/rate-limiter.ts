@@ -1,5 +1,3 @@
-import { logger } from "./logger.js";
-
 export interface RateLimiterConfig {
   maxRequests: number;
   windowMs: number;
@@ -19,20 +17,14 @@ export class RateLimiter {
   }
 
   /**
-   * Check if a user is rate-limited. If not, records the request.
-   * Returns true if the user IS rate-limited (request should be dropped).
+   * Prune expired timestamps for a user, delete their map entry if empty,
+   * and return the live (in-map) array reference (or [] if deleted).
    */
-  isRateLimited(userId: string): boolean {
-    const now = Date.now();
-    const cutoff = now - this.config.windowMs;
+  private pruneExpired(userId: string): number[] {
+    const timestamps = this.windows.get(userId);
+    if (!timestamps) return [];
 
-    let timestamps = this.windows.get(userId);
-    if (!timestamps) {
-      timestamps = [];
-      this.windows.set(userId, timestamps);
-    }
-
-    // Evict expired entries
+    const cutoff = Date.now() - this.config.windowMs;
     const firstValid = timestamps.findIndex((t) => t > cutoff);
     if (firstValid > 0) {
       timestamps.splice(0, firstValid);
@@ -40,29 +32,37 @@ export class RateLimiter {
       timestamps.length = 0;
     }
 
+    if (timestamps.length === 0) {
+      this.windows.delete(userId);
+      return [];
+    }
+    return timestamps;
+  }
+
+  /**
+   * Check if a user is rate-limited. If not, records the request.
+   * Returns true if the user IS rate-limited (request should be dropped).
+   */
+  isRateLimited(userId: string): boolean {
+    const timestamps = this.pruneExpired(userId);
+
     if (timestamps.length >= this.config.maxRequests) {
-      logger.warn({
-        msg: "Rate limit exceeded",
-        userId,
-        count: timestamps.length,
-        maxRequests: this.config.maxRequests,
-        windowMs: this.config.windowMs,
-      });
       return true;
     }
 
-    timestamps.push(now);
+    // Get or create the array (pruneExpired may have deleted it if empty)
+    let arr = this.windows.get(userId);
+    if (!arr) {
+      arr = [];
+      this.windows.set(userId, arr);
+    }
+    arr.push(Date.now());
     return false;
   }
 
   getRemainingRequests(userId: string): number {
-    const now = Date.now();
-    const cutoff = now - this.config.windowMs;
-    const timestamps = this.windows.get(userId);
-    if (!timestamps) return this.config.maxRequests;
-
-    const validCount = timestamps.filter((t) => t > cutoff).length;
-    return Math.max(0, this.config.maxRequests - validCount);
+    const timestamps = this.pruneExpired(userId);
+    return Math.max(0, this.config.maxRequests - timestamps.length);
   }
 
   reset(): void {

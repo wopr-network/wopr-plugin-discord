@@ -353,7 +353,7 @@ describe("handleMessage", () => {
     expect(queueInjectSpy).toHaveBeenCalled();
   });
 
-  it("should drop inject and reply when user is rate-limited", async () => {
+  it("should drop inject and DM user when rate-limited", async () => {
     const rateLimiter = new RateLimiter({ maxRequests: 1, windowMs: 60000 });
     queueManager = new ChannelQueueManager(vi.fn().mockResolvedValue(undefined));
     const queueInjectSpy = vi.spyOn(queueManager, "queueInject");
@@ -375,7 +375,28 @@ describe("handleMessage", () => {
     });
     await handleMessage(msg2, client, ctx, queueManager, rateLimiter);
     expect(queueInjectSpy).toHaveBeenCalledTimes(1); // NOT called again
-    expect(msg2.reply).toHaveBeenCalledWith(expect.stringContaining("rate limit"));
+    // Rate limit notice sent as DM (not channel reply) to avoid channel noise
+    expect(msg2.author.send).toHaveBeenCalledWith(expect.stringContaining("rate limit"));
+    expect(msg2.reply).not.toHaveBeenCalled();
+  });
+
+  it("should not fetch attachments for rate-limited users", async () => {
+    const { saveAttachments } = await import("./attachments.js");
+    const saveAttachmentsMock = vi.mocked(saveAttachments);
+    saveAttachmentsMock.mockClear();
+
+    const rateLimiter = new RateLimiter({ maxRequests: 1, windowMs: 60000 });
+    queueManager = new ChannelQueueManager(vi.fn().mockResolvedValue(undefined));
+
+    // Exhaust the limit
+    const msg1 = createMockMessage({ authorId: "user-3", mentionedUserIds: ["bot-1"], content: "@WOPR first" });
+    await handleMessage(msg1, client, ctx, queueManager, rateLimiter);
+
+    // Rate-limited message with attachments — attachments must NOT be fetched
+    const msg2 = createMockMessage({ authorId: "user-3", mentionedUserIds: ["bot-1"], content: "@WOPR second" });
+    msg2.attachments = new Map([["att-1", { url: "https://cdn.discord.com/file.txt", name: "file.txt" }]]);
+    await handleMessage(msg2, client, ctx, queueManager, rateLimiter);
+    expect(saveAttachmentsMock).not.toHaveBeenCalled();
   });
 
   it("should not rate-limit bot messages", async () => {
