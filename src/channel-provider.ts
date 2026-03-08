@@ -34,9 +34,19 @@ let commandAuthConfig: CommandAuthConfig = {
   allowedUserIds: [],
   allowedRoleIds: [],
 };
+let commandAuthConfigGetter: (() => CommandAuthConfig) | null = null;
 
 export function setCommandAuthConfig(config: CommandAuthConfig): void {
   commandAuthConfig = config;
+  commandAuthConfigGetter = null;
+}
+
+export function setCommandAuthConfigGetter(getter: () => CommandAuthConfig): void {
+  commandAuthConfigGetter = getter;
+}
+
+function getCommandAuthConfig(): CommandAuthConfig {
+  return commandAuthConfigGetter ? commandAuthConfigGetter() : commandAuthConfig;
 }
 
 const MAX_ARG_LENGTH = 512;
@@ -124,13 +134,14 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
   if (!cmd) return false;
 
   // --- Auth check ---
+  const authConfig = getCommandAuthConfig();
   const userId = message.author.id;
-  const userAllowed = commandAuthConfig.allowedUserIds.includes(userId);
+  const userAllowed = authConfig.allowedUserIds.includes(userId);
 
   let roleAllowed = false;
-  if (commandAuthConfig.allowedRoleIds.length > 0 && message.member) {
+  if (authConfig.allowedRoleIds.length > 0 && message.member) {
     const memberRoles = message.member.roles.cache;
-    roleAllowed = commandAuthConfig.allowedRoleIds.some((roleId) => memberRoles.has(roleId));
+    roleAllowed = authConfig.allowedRoleIds.some((roleId) => memberRoles.has(roleId));
   }
 
   if (!userAllowed && !roleAllowed) {
@@ -141,7 +152,11 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
       username: message.author.username,
       reason: "not in allowlist",
     });
-    await message.reply(`You are not authorized to use /${cmdName}.`);
+    try {
+      await message.reply(`You are not authorized to use /${cmdName}.`);
+    } catch (err) {
+      logger.warn({ msg: "reply failed", error: String(err) });
+    }
     return true;
   }
 
@@ -167,7 +182,11 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
     return true;
   } catch (error) {
     logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
-    await message.reply(`Error executing /${cmdName}. Please try again later.`);
+    try {
+      await message.reply(`Error executing /${cmdName}. Please try again later.`);
+    } catch (replyErr) {
+      logger.warn({ msg: "reply failed", error: String(replyErr) });
+    }
     return true;
   }
 }

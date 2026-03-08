@@ -15,7 +15,7 @@ import {
   discordChannelProvider,
   getRegisteredCommand,
   setChannelProviderClient,
-  setCommandAuthConfig,
+  setCommandAuthConfigGetter,
 } from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
 import { createDiscordExtension } from "./discord-extension.js";
@@ -433,20 +433,18 @@ const plugin: WOPRPlugin = {
     setReactionClient(client);
     setChannelProviderClient(client);
 
-    // Wire command auth config
-    const cmdAuthConfig = ctx.getConfig<{
-      commandAllowedUserIds?: string;
-      commandAllowedRoleIds?: string;
-    }>();
-    setCommandAuthConfig({
-      allowedUserIds: (cmdAuthConfig.commandAllowedUserIds ?? "")
+    // Wire command auth config — read dynamically so revocations take effect without restart
+    const parseIdList = (csv: string | undefined): string[] =>
+      (csv ?? "")
         .split(",")
         .map((s) => s.trim())
-        .filter(Boolean),
-      allowedRoleIds: (cmdAuthConfig.commandAllowedRoleIds ?? "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
+        .filter(Boolean);
+    setCommandAuthConfigGetter(() => {
+      const cfg = ctx?.getConfig<{ commandAllowedUserIds?: string; commandAllowedRoleIds?: string }>();
+      return {
+        allowedUserIds: parseIdList(cfg?.commandAllowedUserIds),
+        allowedRoleIds: parseIdList(cfg?.commandAllowedRoleIds),
+      };
     });
 
     // Subscribe session/stream events now that client exists
