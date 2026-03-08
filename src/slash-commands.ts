@@ -13,6 +13,7 @@ import type { ChannelQueueManager } from "./channel-queue.js";
 import { getSessionKeyFromInteraction } from "./discord-utils.js";
 import { logger } from "./logger.js";
 import { DISCORD_LIMIT } from "./message-streaming.js";
+import type { RateLimiter } from "./rate-limiter.js";
 import type { ChannelCommand, StreamMessage, WOPRPluginContext } from "./types.js";
 import {
   autocompleteFocusedSchema,
@@ -201,6 +202,7 @@ export class SlashCommandHandler {
       claimingUserId?: string,
     ) => Promise<{ success: boolean; userId?: string; username?: string; error?: string }>,
     private hasOwner: () => boolean,
+    private rateLimiter?: RateLimiter,
   ) {}
 
   async handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
@@ -613,6 +615,16 @@ export class SlashCommandHandler {
   }
 
   private async handleWoprMessage(interaction: ChatInputCommandInteraction, messageContent: string): Promise<void> {
+    // Per-user rate limit check (WOP-1723)
+    if (this.rateLimiter?.isRateLimited(interaction.user.id)) {
+      logger.warn({ msg: "Slash command /wopr rate-limited", userId: interaction.user.id });
+      await interaction.reply({
+        content: "You've hit the rate limit. Please wait before sending more requests.",
+        ephemeral: true,
+      });
+      return;
+    }
+
     const sessionKey = getSessionKeyFromInteraction(interaction);
     const state = this.queueManager.getSessionState(sessionKey);
     state.messageCount++;

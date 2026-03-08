@@ -331,10 +331,11 @@ const plugin: WOPRPlugin = {
     });
 
     // Create rate limiter from config (WOP-1723)
-    const rateLimitConfig = ctx.getConfig<{
-      maxInjectionsPerUser?: number;
-      rateLimitWindowMs?: number;
-    }>();
+    const rateLimitConfig =
+      ctx.getConfig<{
+        maxInjectionsPerUser?: number;
+        rateLimitWindowMs?: number;
+      }>() ?? {};
     rateLimiter = new RateLimiter({
       maxRequests: rateLimitConfig.maxInjectionsPerUser ?? 10,
       windowMs: rateLimitConfig.rateLimitWindowMs ?? 60000,
@@ -354,6 +355,7 @@ const plugin: WOPRPlugin = {
       getRegisteredCommand,
       discordExtension.claimOwnership,
       () => (ctx ? hasOwner(ctx) : false),
+      rateLimiter,
     );
 
     // 4. Register channel provider
