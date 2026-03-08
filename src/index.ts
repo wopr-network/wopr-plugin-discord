@@ -337,8 +337,8 @@ const plugin: WOPRPlugin = {
         rateLimitWindowMs?: number;
       }>() ?? {};
     rateLimiter = new RateLimiter({
-      maxRequests: rateLimitConfig.maxInjectionsPerUser ?? 10,
-      windowMs: rateLimitConfig.rateLimitWindowMs ?? 60000,
+      maxRequests: Math.max(1, rateLimitConfig.maxInjectionsPerUser ?? 10),
+      windowMs: Math.max(1000, rateLimitConfig.rateLimitWindowMs ?? 60000),
     });
 
     // 2. Create discord extension
