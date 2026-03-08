@@ -44,7 +44,7 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>, label: string): Promi
       if (!isRateLimit || attempt >= RATE_LIMIT_MAX_RETRIES) {
         throw err;
       }
-      const retryAfterMs = (typedErr.retryAfter ?? (attempt + 1) * 2) * 1000;
+      const retryAfterMs = typedErr.retryAfter ?? (attempt + 1) * 2000;
       logger.warn({
         msg: "Discord rate limit hit, retrying",
         label,
