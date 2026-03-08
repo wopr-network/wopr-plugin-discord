@@ -25,6 +25,7 @@ import {
 import { refreshIdentity } from "./identity-manager.js";
 import { logger } from "./logger.js";
 import { cleanupExpiredPairings, hasOwner } from "./pairing.js";
+import { RateLimiter } from "./rate-limiter.js";
 import { setReactionClient } from "./reaction-manager.js";
 import { registerSlashCommands, SlashCommandHandler } from "./slash-commands.js";
 import type { ConfigSchema, WOPRPlugin, WOPRPluginContext } from "./types.js";
@@ -32,6 +33,7 @@ import type { ConfigSchema, WOPRPlugin, WOPRPluginContext } from "./types.js";
 let client: Client | null = null;
 let ctx: WOPRPluginContext | null = null;
 let queueManager: ChannelQueueManager | null = null;
+let rateLimiter: RateLimiter | null = null;
 const cleanups: Array<() => void> = [];
 
 // ============================================================================
@@ -140,6 +142,20 @@ const configSchema: ConfigSchema = {
       default: DEFAULT_ALLOWED_CONTENT_TYPES.join(","),
       description:
         "Comma-separated list of allowed MIME types for attachments (e.g. image/jpeg,image/png,text/plain,application/pdf)",
+    },
+    {
+      name: "maxInjectionsPerUser",
+      type: "number",
+      label: "Max Injections Per User",
+      default: 10,
+      description: "Maximum number of AI requests a single user can make within the rate limit window (default 10)",
+    },
+    {
+      name: "rateLimitWindowMs",
+      type: "number",
+      label: "Rate Limit Window (ms)",
+      default: 60000,
+      description: "Sliding window duration in milliseconds for per-user rate limiting (default 60000 = 60s)",
     },
     { name: "mappings", type: "object", label: "Channel Mappings", hidden: true, default: {} },
   ],
@@ -314,6 +330,16 @@ const plugin: WOPRPlugin = {
       return executeInjectInternal(item, cancelToken, ctx, queueManager);
     });
 
+    // Create rate limiter from config (WOP-1723)
+    const rateLimitConfig = ctx.getConfig<{
+      maxInjectionsPerUser?: number;
+      rateLimitWindowMs?: number;
+    }>();
+    rateLimiter = new RateLimiter({
+      maxRequests: rateLimitConfig.maxInjectionsPerUser ?? 10,
+      windowMs: rateLimitConfig.rateLimitWindowMs ?? 60000,
+    });
+
     // 2. Create discord extension
     const discordExtension = createDiscordExtension(
       () => client,
@@ -392,7 +418,7 @@ const plugin: WOPRPlugin = {
     // 9. Register event handlers
     client.on(Events.MessageCreate, (m) => {
       if (!client || !ctx || !queueManager) return;
-      return handleMessage(m, client, ctx, queueManager).catch((e) =>
+      return handleMessage(m, client, ctx, queueManager, rateLimiter ?? undefined).catch((e) =>
         logger.error({ msg: "Message handling failed", error: String(e) }),
       );
     });
@@ -456,6 +482,10 @@ const plugin: WOPRPlugin = {
     if (queueManager) {
       queueManager.stopProcessing();
       queueManager = null;
+    }
+    if (rateLimiter) {
+      rateLimiter.reset();
+      rateLimiter = null;
     }
     if (ctx?.unregisterSetupContextProvider) {
       ctx.unregisterSetupContextProvider();

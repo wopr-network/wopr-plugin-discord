@@ -211,6 +211,7 @@ export async function handleMessage(
   client: Client,
   ctx: WOPRPluginContext,
   queueManager: ChannelQueueManager,
+  rateLimiter?: import("./rate-limiter.js").RateLimiter,
 ): Promise<void> {
   if (!client.user) return;
 
@@ -357,6 +358,20 @@ export async function handleMessage(
     }
 
     const fullMessage = bufferContext + messageContent;
+
+    // Per-user rate limit check (WOP-1723)
+    if (rateLimiter?.isRateLimited(message.author.id)) {
+      logger.warn({
+        msg: "Human inject rate-limited",
+        channelId,
+        userId: message.author.id,
+        authorDisplayName,
+      });
+      message
+        .reply("You've hit the rate limit. Please wait before sending more requests.")
+        .catch((e) => logger.debug("Rate limit reply error (non-fatal)", { error: e }));
+      return;
+    }
 
     logger.info({
       msg: "Human @mention - queueing (priority)",

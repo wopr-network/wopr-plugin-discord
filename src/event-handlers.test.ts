@@ -81,6 +81,7 @@ import {
 } from "./event-handlers.js";
 import { logger } from "./logger.js";
 import { hasOwner } from "./pairing.js";
+import { RateLimiter } from "./rate-limiter.js";
 import { setMessageReaction } from "./reaction-manager.js";
 import { startTyping, stopTyping } from "./typing-manager.js";
 
@@ -348,6 +349,71 @@ describe("handleMessage", () => {
     });
     message.author.bot = true;
     const queueInjectSpy = vi.spyOn(queueManager, "queueInject");
+    await handleMessage(message, client, ctx, queueManager);
+    expect(queueInjectSpy).toHaveBeenCalled();
+  });
+
+  it("should drop inject and reply when user is rate-limited", async () => {
+    const rateLimiter = new RateLimiter({ maxRequests: 1, windowMs: 60000 });
+    queueManager = new ChannelQueueManager(vi.fn().mockResolvedValue(undefined));
+    const queueInjectSpy = vi.spyOn(queueManager, "queueInject");
+
+    // First message — should go through
+    const msg1 = createMockMessage({
+      authorId: "user-2",
+      mentionedUserIds: ["bot-1"],
+      content: "@WOPR hello",
+    });
+    await handleMessage(msg1, client, ctx, queueManager, rateLimiter);
+    expect(queueInjectSpy).toHaveBeenCalledTimes(1);
+
+    // Second message — should be rate-limited
+    const msg2 = createMockMessage({
+      authorId: "user-2",
+      mentionedUserIds: ["bot-1"],
+      content: "@WOPR hello again",
+    });
+    await handleMessage(msg2, client, ctx, queueManager, rateLimiter);
+    expect(queueInjectSpy).toHaveBeenCalledTimes(1); // NOT called again
+    expect(msg2.reply).toHaveBeenCalledWith(expect.stringContaining("rate limit"));
+  });
+
+  it("should not rate-limit bot messages", async () => {
+    const rateLimiter = new RateLimiter({ maxRequests: 1, windowMs: 60000 });
+    queueManager = new ChannelQueueManager(vi.fn().mockResolvedValue(undefined));
+    const queueInjectSpy = vi.spyOn(queueManager, "queueInject");
+
+    // First bot message
+    const msg1 = createMockMessage({
+      authorId: "other-bot",
+      authorBot: true,
+      mentionedUserIds: ["bot-1"],
+      content: "@WOPR help",
+    });
+    msg1.author.bot = true;
+    await handleMessage(msg1, client, ctx, queueManager, rateLimiter);
+
+    // Second bot message — should still go through (bots not rate-limited)
+    const msg2 = createMockMessage({
+      authorId: "other-bot",
+      authorBot: true,
+      mentionedUserIds: ["bot-1"],
+      content: "@WOPR help again",
+    });
+    msg2.author.bot = true;
+    await handleMessage(msg2, client, ctx, queueManager, rateLimiter);
+    expect(queueInjectSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("should work without rate limiter (backwards compatible)", async () => {
+    queueManager = new ChannelQueueManager(vi.fn().mockResolvedValue(undefined));
+    const queueInjectSpy = vi.spyOn(queueManager, "queueInject");
+    const message = createMockMessage({
+      authorId: "user-2",
+      mentionedUserIds: ["bot-1"],
+      content: "@WOPR hello",
+    });
+    // No rateLimiter passed — should work as before
     await handleMessage(message, client, ctx, queueManager);
     expect(queueInjectSpy).toHaveBeenCalled();
   });
