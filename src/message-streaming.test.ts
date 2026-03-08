@@ -114,7 +114,7 @@ describe("DiscordMessageUnit", () => {
     it("should retry on 429 and succeed on second attempt", async () => {
       const rateLimitError: any = new Error("Rate limited");
       rateLimitError.httpStatus = 429;
-      rateLimitError.retryAfter = 0.001; // 1ms for test speed
+      rateLimitError.retryAfter = 1; // 1ms (retryAfter is already in ms per @discordjs/rest)
       const sentMsg = { id: "sent-1", edit: vi.fn() };
       channel.send.mockRejectedValueOnce(rateLimitError).mockResolvedValueOnce(sentMsg);
 
@@ -122,7 +122,7 @@ describe("DiscordMessageUnit", () => {
       unit.append("Hello");
 
       const flushPromise = unit.flush();
-      // The retry waits retryAfter * 1000 = 1ms
+      // The retry waits retryAfter ms = 1ms
       await vi.advanceTimersByTimeAsync(10);
       const result = await flushPromise;
 
@@ -133,7 +133,7 @@ describe("DiscordMessageUnit", () => {
     it("should throw after max retries exhausted on persistent 429", async () => {
       const rateLimitError: any = new Error("Rate limited");
       rateLimitError.httpStatus = 429;
-      rateLimitError.retryAfter = 0.001;
+      rateLimitError.retryAfter = 1; // 1ms (retryAfter is already in ms per @discordjs/rest)
 
       channel.send.mockRejectedValue(rateLimitError);
 
@@ -156,7 +156,7 @@ describe("DiscordMessageUnit", () => {
     it("should use retry-after header value from error", async () => {
       const rateLimitError: any = new Error("Rate limited");
       rateLimitError.httpStatus = 429;
-      rateLimitError.retryAfter = 0.5; // 500ms
+      rateLimitError.retryAfter = 500; // 500ms (retryAfter is already in ms per @discordjs/rest)
 
       const sentMsg = { id: "sent-1", edit: vi.fn() };
       channel.send.mockRejectedValueOnce(rateLimitError).mockResolvedValueOnce(sentMsg);
@@ -165,7 +165,7 @@ describe("DiscordMessageUnit", () => {
       unit.append("Hello");
 
       const flushPromise = unit.flush();
-      // retryAfterMs = 0.5 * 1000 = 500ms
+      // retryAfterMs = 500ms
       await vi.advanceTimersByTimeAsync(600);
       const result = await flushPromise;
 
