@@ -11,7 +11,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { DEFAULT_ALLOWED_CONTENT_TYPES, DEFAULT_MAX_PER_MESSAGE, DEFAULT_MAX_SIZE_BYTES } from "./attachments.js";
-import { discordChannelProvider, getRegisteredCommand, setChannelProviderClient } from "./channel-provider.js";
+import {
+  discordChannelProvider,
+  getRegisteredCommand,
+  setChannelProviderClient,
+  setCommandAuthConfigGetter,
+} from "./channel-provider.js";
 import { ChannelQueueManager } from "./channel-queue.js";
 import { createDiscordExtension } from "./discord-extension.js";
 import {
@@ -156,6 +161,23 @@ const configSchema: ConfigSchema = {
       label: "Rate Limit Window (ms)",
       default: 60000,
       description: "Sliding window duration in milliseconds for per-user rate limiting (default 60000 = 60s)",
+    },
+    {
+      name: "commandAllowedUserIds",
+      type: "text",
+      label: "Allowed User IDs for Channel Commands",
+      placeholder: "Comma-separated Discord user IDs",
+      default: "",
+      description: "Discord user IDs allowed to invoke message-based /commands. Empty = deny all.",
+    },
+    {
+      name: "commandAllowedRoleIds",
+      type: "text",
+      label: "Allowed Role IDs for Channel Commands",
+      placeholder: "Comma-separated Discord role IDs",
+      default: "",
+      description:
+        "Discord role IDs allowed to invoke message-based /commands. Empty = deny all (unless user IDs are set).",
     },
     { name: "mappings", type: "object", label: "Channel Mappings", hidden: true, default: {} },
   ],
@@ -410,6 +432,20 @@ const plugin: WOPRPlugin = {
     // Wire client into extracted modules
     setReactionClient(client);
     setChannelProviderClient(client);
+
+    // Wire command auth config — read dynamically so revocations take effect without restart
+    const parseIdList = (csv: string | undefined): string[] =>
+      (csv ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    setCommandAuthConfigGetter(() => {
+      const cfg = ctx?.getConfig<{ commandAllowedUserIds?: string; commandAllowedRoleIds?: string }>();
+      return {
+        allowedUserIds: parseIdList(cfg?.commandAllowedUserIds),
+        allowedRoleIds: parseIdList(cfg?.commandAllowedRoleIds),
+      };
+    });
 
     // Subscribe session/stream events now that client exists
     cleanups.push(subscribeSessionEvents(ctx, client));

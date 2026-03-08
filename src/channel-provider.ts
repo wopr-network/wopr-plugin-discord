@@ -14,6 +14,7 @@ import type {
   ChannelMessageParser,
   ChannelProvider,
 } from "./types.js";
+import { sanitize } from "./validation.js";
 
 let discordClient: Client | null = null;
 
@@ -23,6 +24,32 @@ export function setChannelProviderClient(c: Client | null): void {
 
 // Registered commands and parsers from other plugins
 const registeredCommands: Map<string, ChannelCommand> = new Map();
+
+interface CommandAuthConfig {
+  allowedUserIds: string[];
+  allowedRoleIds: string[];
+}
+
+let commandAuthConfig: CommandAuthConfig = {
+  allowedUserIds: [],
+  allowedRoleIds: [],
+};
+let commandAuthConfigGetter: (() => CommandAuthConfig) | null = null;
+
+export function setCommandAuthConfig(config: CommandAuthConfig): void {
+  commandAuthConfig = config;
+  commandAuthConfigGetter = null;
+}
+
+export function setCommandAuthConfigGetter(getter: () => CommandAuthConfig): void {
+  commandAuthConfigGetter = getter;
+}
+
+function getCommandAuthConfig(): CommandAuthConfig {
+  return commandAuthConfigGetter ? commandAuthConfigGetter() : commandAuthConfig;
+}
+
+const MAX_ARG_LENGTH = 512;
 
 export function getRegisteredCommand(name: string): ChannelCommand | undefined {
   return registeredCommands.get(name);
@@ -102,10 +129,40 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
 
   const parts = content.slice(1).split(/\s+/);
   const cmdName = parts[0].toLowerCase();
-  const args = parts.slice(1);
 
   const cmd = registeredCommands.get(cmdName);
   if (!cmd) return false;
+
+  // --- Auth check ---
+  const authConfig = getCommandAuthConfig();
+  const userId = message.author.id;
+  const userAllowed = authConfig.allowedUserIds.includes(userId);
+
+  let roleAllowed = false;
+  if (authConfig.allowedRoleIds.length > 0 && message.member) {
+    const memberRoles = message.member.roles.cache;
+    roleAllowed = authConfig.allowedRoleIds.some((roleId) => memberRoles.has(roleId));
+  }
+
+  if (!userAllowed && !roleAllowed) {
+    logger.warn({
+      msg: "Channel command blocked",
+      cmd: cmdName,
+      userId,
+      username: message.author.username,
+      reason: "not in allowlist",
+    });
+    try {
+      await message.reply(`You are not authorized to use /${cmdName}.`);
+    } catch (err) {
+      logger.warn({ msg: "reply failed", error: String(err) });
+    }
+    return true;
+  }
+
+  // --- Sanitize args ---
+  const rawArgs = parts.slice(1);
+  const args = rawArgs.map((a) => sanitize(a).slice(0, MAX_ARG_LENGTH)).filter((a) => a.length > 0);
 
   const channelId = message.channelId;
 
@@ -125,8 +182,12 @@ export async function handleRegisteredCommand(message: Message): Promise<boolean
     return true;
   } catch (error) {
     logger.error({ msg: "Channel command error", cmd: cmdName, error: String(error) });
-    await message.reply(`Error executing /${cmdName}. Please try again later.`);
-    return true; // Still handled, just with error
+    try {
+      await message.reply(`Error executing /${cmdName}. Please try again later.`);
+    } catch (replyErr) {
+      logger.warn({ msg: "reply failed", error: String(replyErr) });
+    }
+    return true;
   }
 }
 
