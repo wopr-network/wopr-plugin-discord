@@ -21,6 +21,7 @@ import { REACTION_ACTIVE, REACTION_CANCELLED, REACTION_DONE, REACTION_ERROR } fr
 import { logger } from "./logger.js";
 import { DiscordMessageStream, eventBusStreams, handleChunk, streams } from "./message-streaming.js";
 import { buildPairingMessage, createPairingRequest, hasOwner } from "./pairing.js";
+import type { RateLimiter } from "./rate-limiter.js";
 import { setMessageReaction } from "./reaction-manager.js";
 import type {
   SessionCreateEvent,
@@ -211,6 +212,7 @@ export async function handleMessage(
   client: Client,
   ctx: WOPRPluginContext,
   queueManager: ChannelQueueManager,
+  rateLimiter?: RateLimiter,
 ): Promise<void> {
   if (!client.user) return;
 
@@ -304,6 +306,20 @@ export async function handleMessage(
 
   // === HUMAN MESSAGE HANDLING ===
   if (isDirectlyMentioned || isDM) {
+    // Per-user rate limit check — must come first to avoid costly operations (WOP-1723)
+    if (rateLimiter?.isRateLimited(message.author.id)) {
+      logger.warn({
+        msg: "Human inject rate-limited",
+        channelId,
+        userId: message.author.id,
+        authorDisplayName,
+      });
+      message.author
+        .send("You've hit the rate limit. Please wait before sending more requests.")
+        .catch((e: unknown) => logger.debug("Rate limit DM error (non-fatal)", { error: e }));
+      return;
+    }
+
     const bufferContext = queueManager.getBufferContext(channelId);
 
     let messageContent = resolvedContent;

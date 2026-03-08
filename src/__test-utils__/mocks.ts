@@ -31,6 +31,7 @@ export function createMockMessage(
       bot: overrides.authorBot ?? false,
       displayName: overrides.authorUsername ?? "testuser",
       tag: `${overrides.authorUsername ?? "testuser"}#0001`,
+      send: vi.fn().mockResolvedValue(undefined),
     },
     member: {
       displayName: overrides.authorUsername ?? "testuser",
