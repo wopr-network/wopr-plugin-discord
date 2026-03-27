@@ -1,3 +1,11 @@
+# ⚠️ This package has moved
+
+This package is now maintained in the [wopr-plugins monorepo](https://github.com/wopr-network/wopr-plugins/tree/main/packages/plugin-discord).
+
+This repository is archived and no longer accepts contributions.
+
+---
+
 # WOPR Discord Plugin
 
 [![npm version](https://img.shields.io/npm/v/wopr-plugin-discord.svg)](https://www.npmjs.com/package/wopr-plugin-discord)
